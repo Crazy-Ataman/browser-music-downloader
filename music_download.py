@@ -6,9 +6,10 @@ import shutil
 import platform
 import lz4.block
 from pathlib import Path
+from abc import ABC, abstractmethod
 import yt_dlp
-import mutagen
 from mutagen.id3 import ID3, TXXX, COMM, USLT, TSSE, TENC, TYER, TDRC, TDAT, TRCK
+from typing import Optional, Dict, List, Any, Set
 
 
 ALLOW_SKIP_FRAGMENTS = False
@@ -43,26 +44,26 @@ class FragmentLogger:
     Crucial for identifying if a download is corrupt/incomplete.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.skipped = 0
         self.errors = 0
         self.warnings = 0
 
-    def debug(self, msg):
+    def debug(self, msg: str) -> None:
         if "fragment" in msg.lower() and "skipping" in msg.lower():
             self.skipped += 1
 
-    def info(self, msg):
+    def info(self, msg: str) -> None:
         pass
 
-    def warning(self, msg):
+    def warning(self, msg: str) -> None:
         if "fragment" in msg.lower() or "skipping" in msg.lower():
             self.skipped += 1
             print(f"[WARN] Skipped Fragment: {msg}")
         else:
             self.warnings += 1
 
-    def error(self, msg):
+    def error(self, msg: str) -> None:
         print(f"[ERROR] {msg}")
         self.errors += 1
         # Treat 'fragment not found' as a skip event
@@ -70,140 +71,338 @@ class FragmentLogger:
             self.skipped += 1
 
 
-def clear_screen():
+def clear_screen() -> None:
     """Clears terminal screen cross-platform."""
     os.system("cls" if os.name == "nt" else "clear")
 
 
-def is_ffmpeg_installed():
+def is_ffmpeg_installed() -> bool:
     """Checks if FFmpeg is available in the system PATH."""
     return shutil.which("ffmpeg") is not None
 
 
-def get_firefox_profile_path():
+class BrowserBackend(ABC):
     """
-    Locates the most recently modified Firefox profile.
-    Supports Windows, macOS, and Linux (Standard, Snap, Flatpak).
+    Abstract base class for adding future browsers (Edge, Brave, Opera, etc).
     """
-    system = platform.system()
-    potential_paths = []
-    if system == "Windows":
-        potential_paths.append(
-            Path(os.getenv("APPDATA")) / "Mozilla" / "Firefox" / "Profiles"
-        )
-    elif system == "Darwin":
-        potential_paths.append(
-            Path.home() / "Library" / "Application Support" / "Firefox" / "Profiles"
-        )
-    elif system == "Linux":
-        # Standard
-        potential_paths.append(Path.home() / ".mozilla" / "firefox")
-        # Snap
-        potential_paths.append(
-            Path.home() / "snap" / "firefox" / "common" / ".mozilla" / "firefox"
-        )
-        # Flatpak
-        potential_paths.append(
-            Path.home()
-            / ".var"
-            / "app"
-            / "org.mozilla.firefox"
-            / ".mozilla"
-            / "firefox"
-        )
-    else:
+
+    @property
+    @abstractmethod
+    def name(self) -> str:
+        pass
+
+    @abstractmethod
+    def get_profiles(self) -> List[Path]:
+        """Returns a list of Path objects representing browser profiles."""
+        pass
+
+    @abstractmethod
+    def extract_groups(self, profile_path: Path) -> Dict[str, List[str]]:
+        """
+        Returns a dict: {'Group Name': [url1, url2, ...]}
+        """
+        pass
+
+    def _extract_video_id(self, url: str) -> Optional[str]:
+        """Shared utility to extract video ID from URL."""
+        if "youtube.com/watch" in url:
+            match = re.search(r"[?&]v=([^&]+)", url)
+            return match.group(1) if match else None
+        elif "youtu.be/" in url:
+            return url.split("youtu.be/")[1].split("?")[0]
+        elif "youtube.com/shorts/" in url:
+            return url.split("shorts/")[1].split("?")[0]
         return None
 
-    valid_base_paths = [p for p in potential_paths if p.exists()]
+    def _is_youtube_video(self, url: str) -> bool:
+        """Shared utility to check if a URL is a valid video (not search/home)."""
+        if not url:
+            return False
 
-    if not valid_base_paths:
+        if "youtube.com" not in url and "youtu.be" not in url:
+            return False
+
+        # Blacklist search, results, and settings pages
+        if any(
+            x in url
+            for x in [
+                "search_query=",
+                "/results",
+                "accounts.google",
+                "google.com/settings",
+            ]
+        ):
+            return False
+
+        # Ignore the home page
+        clean_check = url.replace("www.", "").replace("https://", "").strip("/")
+        if clean_check == "youtube.com":
+            return False
+
+        # Must be a watch link, short, or shortened link
+        if "/watch" in url or "/shorts/" in url or "youtu.be" in url:
+            return True
+
+        return False
+
+
+class FirefoxBrowser(BrowserBackend):
+    @property
+    def name(self) -> str:
+        return "Mozilla Firefox"
+
+    def get_profiles(self) -> List[Path]:
+        """Locates Firefox profiles (Standard, Snap, Flatpak)."""
+        system = platform.system()
+        potential_base_paths = []
+
+        if system == "Windows":
+            potential_base_paths.append(
+                Path(os.getenv("APPDATA")) / "Mozilla" / "Firefox" / "Profiles"
+            )
+        elif system == "Darwin":
+            potential_base_paths.append(
+                Path.home() / "Library" / "Application Support" / "Firefox" / "Profiles"
+            )
+        elif system == "Linux":
+            potential_base_paths.append(Path.home() / ".mozilla" / "firefox")
+            potential_base_paths.append(
+                Path.home() / "snap" / "firefox" / "common" / ".mozilla" / "firefox"
+            )
+            potential_base_paths.append(
+                Path.home()
+                / ".var"
+                / "app"
+                / "org.mozilla.firefox"
+                / ".mozilla"
+                / "firefox"
+            )
+
+        valid_profiles = []
+        for base in potential_base_paths:
+            if base.exists():
+                # Get all subdirectories that look like profiles
+                valid_profiles.extend([p for p in base.glob("*.*") if p.is_dir()])
+
+        # Return sorted by modification time (newest first)
+        if valid_profiles:
+            return sorted(
+                valid_profiles, key=lambda p: os.path.getmtime(p), reverse=True
+            )
+        return []
+
+    def _load_lz4_json(self, file_path: Path) -> Optional[Dict[str, Any]]:
+        """Decompress Mozilla LZ4 JSON."""
+        try:
+            with open(file_path, "rb") as file:
+                data = file.read()
+                if data[:8] == b"mozLz40\0":
+                    decompressed = lz4.block.decompress(data[8:])
+                    return json.loads(decompressed)
+        except Exception as e:
+            return None
         return None
 
-    all_profiles = []
-    for base in valid_base_paths:
-        all_profiles.extend(list(base.glob("*.*")))
+    def extract_groups(self, profile_path: Path) -> Dict[str, List[str]]:
+        """Reads sessionstore/recovery.jsonlz4 to find active Tab Groups."""
+        files = [
+            profile_path / "sessionstore-backups" / "recovery.jsonlz4",
+            profile_path / "sessionstore-backups" / "previous.jsonlz4",
+            profile_path / "sessionstore.jsonlz4",
+        ]
 
-    if not all_profiles:
-        return None
+        json_data = None
+        for f in files:
+            if f.exists():
+                json_data = self._load_lz4_json(f)
+                if json_data:
+                    break
 
-    # Return the one modified most recently
-    return max(all_profiles, key=os.path.getmtime)
+        if not json_data:
+            return {}
+
+        organized_groups = {}
+        seen_video_ids = set()
+
+        if "windows" not in json_data:
+            return {}
+
+        for window in json_data["windows"]:
+            group_metadata = {}
+            raw_groups = window.get("groups", [])
+
+            for g in raw_groups:
+                g_id = g.get("id")
+                g_title = g.get("title") or g.get("name") or "Untitled Group"
+                if g_id:
+                    group_metadata[g_id] = g_title
+
+            if not group_metadata:
+                continue
+
+            for tab in window.get("tabs", []):
+                group_id = tab.get("groupId")
+                if group_id:
+                    group_id = str(group_id)
+
+                if not group_id or group_id not in group_metadata:
+                    continue
+
+                entries = tab.get("entries", [])
+                if not entries:
+                    continue
+
+                active_idx = tab.get("index", 1) - 1
+                if 0 <= active_idx < len(entries):
+                    url = entries[active_idx].get("url", "")
+
+                    if self._is_youtube_video(url):
+                        vid_id = self._extract_video_id(url)
+
+                        if vid_id and vid_id not in seen_video_ids:
+                            seen_video_ids.add(vid_id)
+                            group_name = group_metadata[group_id]
+                            if group_name not in organized_groups:
+                                organized_groups[group_name] = []
+                            organized_groups[group_name].append(url)
+
+        return organized_groups
 
 
-def load_session_data(profile_path):
-    """
-    Reads Firefox session data. Firefox compresses this using a non-standard LZ4 format.
-    Requires header offset skipping (b"mozLz40\\0").
-    """
-    # Priority:
-    # 1. recovery.jsonlz4 - Live session (if Firefox is running/crashed)
-    # 2. previous.jsonlz4 - Backup of the last session
-    # 3. sessionstore.jsonlz4 - Saved state when Firefox is closed cleanly
-    files = [
-        profile_path / "sessionstore-backups" / "recovery.jsonlz4",
-        profile_path / "sessionstore-backups" / "previous.jsonlz4",
-        profile_path / "sessionstore.jsonlz4",
-    ]
+class ChromeBrowser(BrowserBackend):
+    @property
+    def name(self) -> str:
+        return "Google Chrome"
 
-    for f in files:
-        if f.exists():
+    def get_profiles(self) -> List[Path]:
+        system = platform.system()
+        base_path = None
+        if system == "Windows":
+            base_path = (
+                Path(os.getenv("LOCALAPPDATA")) / "Google" / "Chrome" / "User Data"
+            )
+        elif system == "Darwin":
+            base_path = (
+                Path.home() / "Library" / "Application Support" / "Google" / "Chrome"
+            )
+        elif system == "Linux":
+            base_path = Path.home() / ".config" / "google-chrome"
+
+        if not base_path or not base_path.exists():
+            return []
+
+        profiles = []
+        if (base_path / "Default").exists():
+            profiles.append(base_path / "Default")
+        profiles.extend(list(base_path.glob("Profile *")))
+
+        def get_pref_mtime(p):
+            pref = p / "Preferences"
+            return pref.stat().st_mtime if pref.exists() else 0
+
+        # Sort by recently used
+        return sorted(profiles, key=get_pref_mtime, reverse=True)
+
+    def _get_active_session_urls(self, profile_path: Path) -> List[str]:
+        """
+        Scrapes the binary 'Current Session' (SNSS format) using Regex.
+        Filters navigation history and duplicates.
+        """
+        sessions_dir = profile_path / "Sessions"
+        if not sessions_dir.exists():
+            return []
+
+        target_file = sessions_dir / "Current Session"
+
+        # If the Current Session file is locked or empty, try to find the last Session_*
+        if not target_file.exists() or target_file.stat().st_size == 0:
+            session_files = list(sessions_dir.glob("Session_*"))
+            if session_files:
+                target_file = max(session_files, key=os.path.getmtime)
+            else:
+                return []
+
+        final_urls = []
+        seen_video_ids = set()
+
+        url_pattern = re.compile(rb'(https?://[^\x00-\x20\x7f"<>|\^`{\}]+)')
+
+        try:
+            with open(target_file, "rb") as f:
+                content = f.read()
+                matches = url_pattern.findall(content)
+
+                # Read the file from the end, since the current tabs are usually at the end of the file
+                for match in reversed(matches):
+                    try:
+                        dec_url = match.decode("utf-8")
+
+                        if self._is_youtube_video(dec_url):
+                            vid_id = self._extract_video_id(dec_url)
+                            if vid_id and vid_id not in seen_video_ids:
+                                seen_video_ids.add(vid_id)
+                                final_urls.append(dec_url)
+
+                    except UnicodeDecodeError:
+                        continue
+        except Exception as e:
+            print(f"[WARN] Could not read Chrome Session file: {e}")
+
+        return final_urls
+
+    def extract_groups(self, profile_path: Path) -> Dict[str, List[str]]:
+        organized_groups = {}
+
+        active_urls = self._get_active_session_urls(profile_path)
+        if active_urls:
+            organized_groups["[Active Session] Open Tabs"] = active_urls
+
+        bookmarks_path = profile_path / "Bookmarks"
+
+        if bookmarks_path.exists():
             try:
-                with open(f, "rb") as file:
-                    data = file.read()
-                    if data[:8] == b"mozLz40\0":
-                        decompressed = lz4.block.decompress(data[8:])
-                        return json.loads(decompressed)
-            except Exception as e:
-                print(f"[ERROR] Could not read {f.name}: {e}")
-    return None
+                with open(bookmarks_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+
+                seen_bookmark_vids = set()
+
+                def recurse_nodes(node, current_folder_name=None):
+                    my_name = node.get("name", "")
+                    if "children" in node:
+                        next_group = (
+                            my_name
+                            if node.get("id") != "0"
+                            and my_name
+                            not in [
+                                "Bookmarks bar",
+                                "Other bookmarks",
+                                "Mobile bookmarks",
+                            ]
+                            else current_folder_name
+                        )
+                        for child in node["children"]:
+                            recurse_nodes(child, next_group)
+                    elif "url" in node:
+                        url = node["url"]
+                        if self._is_youtube_video(url):
+                            vid_id = self._extract_video_id(url)
+                            if vid_id and vid_id not in seen_bookmark_vids:
+                                seen_bookmark_vids.add(vid_id)
+                                if current_folder_name:
+                                    if current_folder_name not in organized_groups:
+                                        organized_groups[current_folder_name] = []
+                                    organized_groups[current_folder_name].append(url)
+
+                roots = data.get("roots", {})
+                for root_key in roots:
+                    recurse_nodes(roots[root_key])
+            except Exception:
+                pass
+
+        return organized_groups
 
 
-def extract_named_groups(json_data):
-    """
-    Parses the massive JSON session object to find 'Tab Groups' (specific to Firefox).
-    Returns a dict: {'Group Name': [url1, url2, ...]}
-    """
-    organized_groups = {}
-    if "windows" not in json_data:
-        return {}
-
-    for window in json_data["windows"]:
-        group_metadata = {}
-        raw_groups = window.get("groups", [])
-
-        for g in raw_groups:
-            g_id = g.get("id")
-            g_title = g.get("title") or g.get("name") or "Untitled Group"
-            if g_id:
-                group_metadata[g_id] = g_title
-
-        if not group_metadata:
-            continue
-
-        for tab in window.get("tabs", []):
-            group_id = tab.get("groupId")
-            if group_id is not None:
-                group_id = str(group_id)
-
-            if not group_id or group_id not in group_metadata:
-                continue
-
-            entries = tab.get("entries", [])
-            if not entries:
-                continue
-
-            active_idx = tab.get("index", 1) - 1
-            if 0 <= active_idx < len(entries):
-                url = entries[active_idx].get("url", "")
-                group_name = group_metadata[group_id]
-                if group_name not in organized_groups:
-                    organized_groups[group_name] = []
-                organized_groups[group_name].append(url)
-
-    return organized_groups
-
-
-def ask_quality():
+def ask_quality() -> Optional[Dict[str, Any]]:
     """CLI Menu for selecting audio quality."""
     global ALLOW_SKIP_FRAGMENTS
     ffmpeg_available = is_ffmpeg_installed()
@@ -249,7 +448,7 @@ def ask_quality():
         print("Invalid selection.")
 
 
-def clean_tags(filepath):
+def clean_tags(filepath: Path) -> None:
     """
     Metadata cleaning for MP3s using Mutagen.
     Removes proprietary ffmpeg tags (TSSE, TENC) and comments (TXXX).
@@ -338,7 +537,9 @@ def clean_tags(filepath):
         print(f"[CLEANER ERROR] Failed on {filepath.name}: {e}")
 
 
-def download_audio(urls, group_name, quality_settings):
+def download_audio(
+    urls: List[str], group_name: str, quality_settings: Dict[str, Any]
+) -> Dict[str, int]:
     """
     Orchestrates the download process using yt-dlp.
     Handles filename generation, conversions, and metadata post-processing.
@@ -461,117 +662,146 @@ def download_audio(urls, group_name, quality_settings):
     }
 
 
-def main():
+def main() -> None:
     try:
-        profile = get_firefox_profile_path()
-        if not profile:
-            print("Error: Firefox profile not found. Is Firefox installed?")
-            print("Searched in standard, Snap, and Flatpak locations.")
-            input("Press Enter to exit...")
-            return
+        browsers = [FirefoxBrowser(), ChromeBrowser()]
 
         while True:
             clear_screen()
             print("==========================================")
-            print("   FIREFOX TAB GROUP MUSIC DOWNLOADER")
+            print("     UNIVERSAL TAB GROUP DOWNLOADER       ")
             print("==========================================")
-            print(f"Profile: {profile.name}")
 
-            data = load_session_data(profile)
-            if not data:
-                print("Error: Could not load session data.")
-                print("Tip: If Firefox is running, recovery.jsonlz4 handles the data.")
-                input("Press Enter to retry...")
-                continue
+            print("\nSelect Browser:")
+            for i, b in enumerate(browsers):
+                print(f"[{i + 1}] {b.name}")
+            print("[q] Quit")
 
-            groups = extract_named_groups(data)
-
-            # Filter only groups that have YouTube links
-            valid_groups = {}
-            for name, links in groups.items():
-                yt_links = [u for u in links if "youtube.com" in u or "youtu.be" in u]
-                if yt_links:
-                    valid_groups[name] = yt_links
-
-            if not valid_groups:
-                print("\nNo Tab Groups with YouTube links found.")
-                print("Options: [r] Refresh Data, [q] Quit")
-                choice = input("Choice: ").strip().lower()
-                if choice == "q":
-                    sys.exit()
-                continue
-
-            group_names = list(valid_groups.keys())
-            print(f"\nAvailable Groups (with YouTube links):")
-            for i, name in enumerate(group_names):
-                count = len(valid_groups[name])
-                print(f"[{i + 1}] {name} ({count} videos)")
-
-            print("\n------------------------------------------")
-            print("[Number] Select Group")
-            print("[r]      Refresh Data (if you added tabs)")
-            print("[q]      Quit Script")
-
-            choice_input = input("\nChoice: ").strip().lower()
-
-            if choice_input == "q":
+            choice = input("\nChoice: ").strip().lower()
+            if choice == "q":
                 sys.exit()
 
-            if choice_input == "r":
-                print("Reloading...")
-                continue
-
-            target_group = None
+            backend = None
             try:
-                choice_idx = int(choice_input) - 1
-                if 0 <= choice_idx < len(group_names):
-                    target_group = group_names[choice_idx]
+                if choice.isdigit():
+                    backend = browsers[int(choice) - 1]
                 else:
-                    print("Invalid number!")
-                    input("Press Enter to continue...")
                     continue
-            except ValueError:
-                print("Invalid input!")
-                input("Press Enter to continue...")
+            except (ValueError, IndexError):
                 continue
 
-            urls = valid_groups[target_group]
-
-            print(f"\nSelected: '{target_group}'")
-            print(f"Preparing to download {len(urls)} links...")
-
-            quality = ask_quality()
-            if quality is None:
+            profiles = backend.get_profiles()
+            if not profiles:
+                print(f"\nNo profiles found for {backend.name}.")
+                input("Press Enter to back...")
                 continue
 
-            try:
-                stats = download_audio(urls, target_group, quality)
+            current_profile_idx = 0
+            back_to_browser_menu = False
 
-                print("\n==========================================")
-                print("             JOB COMPLETE                 ")
-                print("==========================================")
-                print(f"Processed: {len(urls)} links")
-                print(f"New Files: {stats['new_files']} added")
+            while True:
+                if back_to_browser_menu:
+                    break
 
-                if stats["skipped_fragments"] > 0:
-                    print(
-                        f"WARNING: {stats['skipped_fragments']} audio blocks were MISSING."
+                selected_profile = profiles[current_profile_idx]
+
+                while True:
+                    clear_screen()
+                    print(f"Browser: {backend.name}")
+                    print(f"Profile: {selected_profile.name}")
+                    print(f"Path:    {selected_profile}")
+                    print("-" * 40)
+                    print("Reading data...")
+
+                    groups = backend.extract_groups(selected_profile)
+
+                    valid_groups = {}
+                    for name, links in groups.items():
+                        yt_links = [
+                            u for u in links if "youtube.com" in u or "youtu.be" in u
+                        ]
+                        if yt_links:
+                            valid_groups[name] = yt_links
+
+                    if not valid_groups:
+                        print("\nNo YouTube links found in this profile's Bookmarks.")
+
+                        if backend.name == "Google Chrome":
+                            print("\n[!] TIPS FOR CHROME:")
+                            print(" 1. To detect links while Chrome is running:")
+                            print("    - Right-click tabs and 'Add tabs to new group'.")
+                            print(
+                                "    - Press (Ctrl+Shift+D) to bookmark all tabs into a folder."
+                            )
+                            print(
+                                " 2. Note: The script will prioritize Group Tab names."
+                            )
+                            print(" 3. Current profile: " + selected_profile.name)
+                            print("    Press [p] to switch profiles if needed.")
+
+                        print("-" * 40)
+                        print("[r] Refresh Data")
+                        print("[p] Switch Profile (Found " + str(len(profiles)) + ")")
+                        print("[b] Back to Browser Selection")
+                        print("[q] Quit")
+
+                        choice_input = input("Choice: ").strip().lower()
+                        if choice_input == "q":
+                            sys.exit()
+                        if choice_input == "b":
+                            back_to_browser_menu = True
+                            break
+                        if choice_input == "p":
+                            current_profile_idx = (current_profile_idx + 1) % len(
+                                profiles
+                            )
+                            break
+                        if choice_input == "r":
+                            continue
+
+                        continue
+
+                    group_names = list(valid_groups.keys())
+                    print(f"\nFound Groups/Folders:")
+                    for i, name in enumerate(group_names):
+                        print(f"[{i + 1}] {name} ({len(valid_groups[name])} videos)")
+
+                    print("\n------------------------------------------")
+                    print("[#] Select Group")
+                    print("[r] Refresh Data")
+                    print("[p] Switch Profile")
+                    print("[b] Back")
+
+                    choice_input = input("\nChoice: ").strip().lower()
+                    if choice_input == "q":
+                        sys.exit()
+                    if choice_input == "b":
+                        back_to_browser_menu = True
+                        break
+                    if choice_input == "p":
+                        current_profile_idx = (current_profile_idx + 1) % len(profiles)
+                        break
+                    if choice_input == "r":
+                        continue
+
+                    try:
+                        target_group = group_names[int(choice_input) - 1]
+                    except (ValueError, IndexError):
+                        continue
+
+                    quality = ask_quality()
+                    if quality is None:
+                        continue
+
+                    stats = download_audio(
+                        valid_groups[target_group], target_group, quality
                     )
-                    if ALLOW_SKIP_FRAGMENTS:
-                        print("         (Files saved with possible glitches/silence)")
-                    else:
-                        print("         (Some downloads may have aborted)")
-                else:
-                    print("Status:    Perfect Stream (0 blocks skipped)")
 
-                print("==========================================")
-            except Exception as e:
-                print(f"\nCRITICAL ERROR: {e}")
-
-            input("\nPress Enter to return to menu...")
+                    print(f"Downloaded {stats['new_files']} files")
+                    print("\nJob Complete.")
+                    input("Press Enter to continue...")
 
     except KeyboardInterrupt:
-        print("\n\nExiting gracefully...")
         sys.exit(0)
 
 

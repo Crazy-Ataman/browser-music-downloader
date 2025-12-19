@@ -2,13 +2,16 @@
 
 A Python automation tool that extracts YouTube links directly from your open browser tabs and downloads them as high-quality audio files.
 
-> **Current Status:** Fully supports **Mozilla Firefox** (including Tab Groups).
+> **Current Status:** Fully supports **Mozilla Firefox** (Tab Groups) and **Google Chrome** (Active Sessions & Bookmarks).
 
-It handles the entire process: locating the Firefox session file, decompressing the proprietary LZ4 format, extracting links by group name, downloading via `yt-dlp`, and post-processing metadata.
+It handles the entire process: locating browser profiles, decompressing session data, filtering out non-video links (like search results), downloading via `yt-dlp`, and post-processing metadata.
 
 ## Features
-
-*   **Smart Integration:** Automatically detects open Tab Groups and extracts links without manual copy-pasting.
+*   **Multi-Browser Support:** Choose between Firefox and Chrome profiles on launch.
+*   **Smart Integration:**
+    *   **Firefox:** Decompresses `jsonlz4` session files to find active Tab Groups.
+    *   **Chrome:** Scrapes active sessions and parses the Bookmarks JSON.
+*   **Intelligent Filtering:** Automatically skips YouTube search results, homepages, and duplicate video IDs within a group.
 *   **Format Options:**
     *   **Best MP3:** High quality (~240-320kbps VBR) with ID3 tags.
     *   **Standard MP3:** 192kbps for general use.
@@ -24,8 +27,9 @@ It handles the entire process: locating the Firefox session file, decompressing 
 
 To use this tool fully, you need the following:
 
+
 1.  **Python 3.8+**
-2.  **Mozilla Firefox** (must be installed and have active tabs).
+2.  **A Supported Browser:** Mozilla Firefox or Google Chrome.
 3.  **FFmpeg** (Required for MP3 conversion and metadata embedding).
 
 ### Python Dependencies
@@ -56,27 +60,34 @@ The script relies on these libraries:
 
 ## Usage
 
-1.  Open Firefox and organize your music videos into a **Tab Group** (or just have them open).
-2.  Run the script:
-    ```bash
-    python music_download.py
-    ```
-3.  The script will:
-    *   Detect your Firefox profile.
-    *   List all found Tab Groups containing YouTube links.
-    *   Ask you to select a group.
-    *   Ask for desired audio quality.
-4.  Files will be saved in the `downloads/Group Name` folder.
+### For Mozilla Firefox Users
+1.  Organize your videos into **Tab Groups**.
+2.  Run the script and select Firefox.
+3.  The script will detect your Tab Groups by name.
+
+### For Google Chrome Users
+Chrome handles session files differently. To ensure your tabs are detected immediately:
+1.  Right-click your music tabs and select **"Add tabs to new group"** (give the group a name).
+2.  While Chrome is open, press **`Ctrl+Shift+D`** (Windows/Linux) or **`Cmd+Shift+D`** (Mac) to bookmark all open tabs into a folder.
+3.  Run the script and select Google Chrome. It will detect both your active sessions and your bookmark folders.
+
+
+### Running the Tool
+```bash
+python music_download.py
+```
+1.  **Select Browser:** Choose 1 for Firefox or 2 for Chrome.
+2.  **Select Profile:** If you have multiple profiles, choose the active one.
+3.  **Select Group:** Choose the Tab Group or Folder you want to download.
+4.  **Select Quality:** Choose your preferred bitrate.
 
 ## How it works
 
-Firefox stores its session data (open tabs) in a file called `recovery.jsonlz4`. This is a non-standard format compressed with LZ4.
-
-This script:
-1.  Locates the correct profile folder across different OS structures.
-2.  Decompresses the LZ4 stream (skipping the proprietary header).
-3.  Parses the JSON to find "Tab Groups" (grouping logic).
-4.  Passes valid URLs to `yt-dlp` for processing.
+*   **Firefox:** Reads `recovery.jsonlz4`. It decompresses the LZ4 stream, skips the proprietary Mozilla header, and parses the JSON structure to find group titles and tab URLs.
+*   **Chrome:**
+    *   **Sessions:** Scrapes the binary `Current Session` (SNSS format) using Regex to find YouTube URLs even if the file is partially locked.
+    *   **Bookmarks:** Parses the `Bookmarks` JSON file to extract organized folders.
+*   **Post-Processing:** Uses `mutagen` to scrub "provided to YouTube" text and technical tags, leaving you with a clean, professional-looking music library.
 
 ## License
 
