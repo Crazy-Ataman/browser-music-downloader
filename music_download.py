@@ -8,7 +8,7 @@ import lz4.block
 from pathlib import Path
 from abc import ABC, abstractmethod
 import yt_dlp
-from mutagen.id3 import ID3, TXXX, COMM, USLT, TSSE, TENC, TYER, TDRC, TDAT, TRCK
+from mutagen.id3 import ID3, TXXX, COMM, USLT, TSSE, TENC, TYER, TDRC, TDAT, TRCK, TIT2
 from typing import Optional, Dict, List, Any, Set
 
 
@@ -80,6 +80,76 @@ def is_ffmpeg_installed() -> bool:
     """Checks if FFmpeg is available in the system PATH."""
     return shutil.which("ffmpeg") is not None
 
+def sanitize_text(text: str) -> str:
+    """Removes common YouTube junk text from titles/filenames."""
+    if not text:
+        return ""
+
+    # List of patterns to remove (Case insensitive)
+    patterns = [
+        r'\s*[({\[]\s*official\s*video\s*[)}\]]',      # (Official Video)
+        r'\s*[({\[]\s*official\s*music\s*video\s*[)}\]]', # (Official Music Video)
+        r'\s*[({\[]\s*official\s*audio\s*[)}\]]',      # (Official Audio)
+        r'\s*[({\[]\s*official\s*lyric\s*video\s*[)}\]]', # (Official Lyric Video)
+        r'\s*[({\[]\s*video\s*[)}\]]',                 # (Video)
+        r'\s*[({\[]\s*audio\s*[)}\]]',                 # (Audio)
+        r'\s*[({\[]\s*lyrics\s*[)}\]]',                # (Lyrics)
+        r'\s*[({\[]\s*visualizer\s*[)}\]]',            # (Visualizer)
+        r'\s*[({\[]\s*hq\s*[)}\]]',                    # (HQ)
+        r'\s*[({\[]\s*hd\s*[)}\]]',                    # (HD)
+        r'\s*[({\[]\s*4k\s*[)}\]]',                    # (4K)
+        r'\s*[({\[]\s*new\s*single\s*[)}\]]',          # (NEW SINGLE)
+        r'\s*[({\[]\s*live\s*@.*?[)}\]]',              # (Live @ ...)
+        r'\s*[({\[]\s*with\s*vocals\s*[)}\]]',         # (with vocals)
+    ]
+
+    clean_text = text
+    for p in patterns:
+        clean_text = re.sub(p, '', clean_text, flags=re.IGNORECASE)
+
+    # Remove trailing separators often left behind (e.g., "Song - " -> "Song")
+    clean_text = re.sub(r'\s*[-|]\s*$', '', clean_text)
+    clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+    if ".." in clean_text:
+        clean_text = clean_text.replace('..', '.')
+
+    return clean_text
+
+def show_progress(d):
+    """
+    Custom hook to show a single-line progress bar.
+    Prevents the terminal from scrolling/stacking endlessly.
+    """
+    if d['status'] == 'downloading':
+        # Get values
+        p = d.get('_percent_str', '0%').replace('%','')
+        speed = d.get('_speed_str', 'N/A')
+        eta = d.get('_eta_str', 'N/A')
+        filename = d.get('filename', '').split(os.sep)[-1]
+
+        # Truncate filename if too long
+        if len(filename) > 30:
+            filename = filename[:27] + "..."
+
+        # Create a visual bar [======    ]
+        try:
+            percent = float(p)
+            bar_length = 20
+            filled_length = int(bar_length * percent // 100)
+            bar = '█' * filled_length + '-' * (bar_length - filled_length)
+        except ValueError:
+            bar = '-' * 20
+            p = "??"
+
+        # Print with \r to overwrite the line (Animation effect)
+        sys.stdout.write(f"\r[DOWNLOADING] |{bar}| {p}% | {speed} | ETA: {eta} | {filename}    ")
+        sys.stdout.flush()
+
+    elif d['status'] == 'finished':
+        # Оттестить еще этот момент
+        # Изменить размер с 40  там на 70
+        sys.stdout.write(f"\r[COMPLETE]    |{'█'*20}| 100% | Downloaded! Processing...                     \n")
+        sys.stdout.flush()
 
 class BrowserBackend(ABC):
     """
@@ -452,7 +522,7 @@ def clean_tags(filepath: Path) -> None:
     """
     Metadata cleaning for MP3s using Mutagen.
     Removes proprietary ffmpeg tags (TSSE, TENC) and comments (TXXX).
-    Standardizes Year (TYER) and removes Track Numbers (TRCK).
+    Standardizes Year (TYER), clean title and removes Track Numbers (TRCK).
     """
     if not filepath.exists():
         return
@@ -529,6 +599,14 @@ def clean_tags(filepath: Path) -> None:
         if found_year:
             audio.add(TYER(encoding=3, text=found_year))
 
+        if "TIT2" in audio:
+            original_title = str(audio["TIT2"].text[0])
+            new_title = sanitize_text(original_title)
+            if new_title != original_title:
+                audio.add(TIT2(encoding=3, text=new_title))
+                print(f"[METADATA] Renamed Title: '{original_title}' -> '{new_title}'")
+
+
         # Save (Force ID3v2.3 for max Windows/Car compatibility)
         audio.save(v1=0, v2_version=3)
         print(f"[CLEANER] Sanitized tags: {filepath.name}")
@@ -562,7 +640,7 @@ def download_audio(
         "verbose": False,
         "quiet": False,
         "logger": frag_logger,
-        "progress_hooks": [],
+        "progress_hooks": [show_progress],
         "socket_timeout": 30,
         "retries": 15,
         "fragment_retries": 15,
@@ -647,9 +725,37 @@ def download_audio(
         print(f"\n[ERROR] {e}")
 
     if has_ffmpeg:
-        print("\n[POST-PROCESSING] Cleaning tags...")
-        for file_path in downloaded_files:
+        print("\n" + "="*50)
+        print("\n[POST-PROCESSING] Cleaning tags and renaming files...")
+        print("="*50)
+
+        total = len(downloaded_files)
+
+        for i, file_path in enumerate(downloaded_files):
+            sys.stdout.write(f"\r[PROCESSING] Item {i+1}/{total}: {file_path.name[:40]}...    ")
+            sys.stdout.flush()
+
             if file_path.exists():
+                original_stem = file_path.stem
+                clean_stem = sanitize_text(original_stem)
+
+                if clean_stem != original_stem:
+                    new_filename = f"{clean_stem}{file_path.suffix}"
+                    new_path = file_path.parent / new_filename
+
+                    try:
+                        if new_path.exists():
+                            new_path = file_path.parent / f"{clean_stem}_{i}{file_path.suffix}"
+
+                        os.rename(file_path, new_path)
+                        print(f"\n[RENAME] {file_path.name} -> {new_path.name}")
+
+                        downloaded_files[i] = new_path
+                        file_path = new_path
+
+                    except OSError as e:
+                        print(f"[RENAME ERROR] Could not rename {file_path.name}: {e}")
+
                 clean_tags(file_path)
 
     files_after = set(download_path.glob("*"))
@@ -771,6 +877,7 @@ def main() -> None:
                     print("[r] Refresh Data")
                     print("[p] Switch Profile")
                     print("[b] Back")
+                    print("[q] Quit")
 
                     choice_input = input("\nChoice: ").strip().lower()
                     if choice_input == "q":
