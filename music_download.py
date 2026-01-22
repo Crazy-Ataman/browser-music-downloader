@@ -8,6 +8,7 @@ import lz4.block
 from pathlib import Path
 from abc import ABC, abstractmethod
 import yt_dlp
+from yt_dlp.utils import DownloadError
 from mutagen.id3 import ID3, TXXX, COMM, USLT, TSSE, TENC, TYER, TDRC, TDAT, TRCK, TIT2
 from typing import Optional, Dict, List, Any, Set
 
@@ -38,6 +39,12 @@ QUALITY_OPTIONS = {
 }
 
 
+class FatalForbiddenError(Exception):
+    """Custom exception to stop the script immediately on 403 errors."""
+
+    pass
+
+
 class FragmentLogger:
     """
     Custom logger for yt-dlp to track missing video fragments/blocks.
@@ -64,6 +71,10 @@ class FragmentLogger:
             self.warnings += 1
 
     def error(self, msg: str) -> None:
+        if "403" in msg or "Forbidden" in msg:
+            print("\n[FATAL] HTTP Error 403 Detected! YouTube blocked the connection.")
+            raise FatalForbiddenError("403 Forbidden")
+
         print(f"[ERROR] {msg}")
         self.errors += 1
         # Treat 'fragment not found' as a skip event
@@ -80,6 +91,7 @@ def is_ffmpeg_installed() -> bool:
     """Checks if FFmpeg is available in the system PATH."""
     return shutil.which("ffmpeg") is not None
 
+
 def sanitize_text(text: str) -> str:
     """Removes common YouTube junk text from titles/filenames."""
     if not text:
@@ -87,47 +99,46 @@ def sanitize_text(text: str) -> str:
 
     # List of patterns to remove (Case insensitive)
     patterns = [
-        r'\s*[({\[]\s*official\s*video\s*[)}\]]',      # (Official Video)
-        r'\s*[({\[]\s*official\s*music\s*video\s*[)}\]]', # (Official Music Video)
-        r'\s*[({\[]\s*official\s*audio\s*[)}\]]',      # (Official Audio)
-        r'\s*[({\[]\s*official\s*lyric\s*video\s*[)}\]]', # (Official Lyric Video)
-        r'\s*[({\[]\s*video\s*[)}\]]',                 # (Video)
-        r'\s*[({\[]\s*audio\s*[)}\]]',                 # (Audio)
-        r'\s*[({\[]\s*lyrics\s*[)}\]]',                # (Lyrics)
-        r'\s*[({\[]\s*visualizer\s*[)}\]]',            # (Visualizer)
-        r'\s*[({\[]\s*hq\s*[)}\]]',                    # (HQ)
-        r'\s*[({\[]\s*hd\s*[)}\]]',                    # (HD)
-        r'\s*[({\[]\s*4k\s*[)}\]]',                    # (4K)
-        r'\s*[({\[]\s*new\s*single\s*[)}\]]',          # (NEW SINGLE)
-        r'\s*[({\[]\s*live\s*@.*?[)}\]]',              # (Live @ ...)
-        r'\s*[({\[]\s*with\s*vocals\s*[)}\]]',         # (with vocals)
+        r"\s*[({\[]\s*official\s*video\s*[)}\]]",  # (Official Video)
+        r"\s*[({\[]\s*official\s*music\s*video\s*[)}\]]",  # (Official Music Video)
+        r"\s*[({\[]\s*official\s*audio\s*[)}\]]",  # (Official Audio)
+        r"\s*[({\[]\s*official\s*lyric\s*video\s*[)}\]]",  # (Official Lyric Video)
+        r"\s*[({\[]\s*video\s*[)}\]]",  # (Video)
+        r"\s*[({\[]\s*audio\s*[)}\]]",  # (Audio)
+        r"\s*[({\[]\s*lyrics\s*[)}\]]",  # (Lyrics)
+        r"\s*[({\[]\s*visualizer\s*[)}\]]",  # (Visualizer)
+        r"\s*[({\[]\s*hq\s*[)}\]]",  # (HQ)
+        r"\s*[({\[]\s*hd\s*[)}\]]",  # (HD)
+        r"\s*[({\[]\s*4k\s*[)}\]]",  # (4K)
+        r"\s*[({\[]\s*new\s*single\s*[)}\]]",  # (NEW SINGLE)
+        r"\s*[({\[]\s*live\s*@.*?[)}\]]",  # (Live @ ...)
+        r"\s*[({\[]\s*with\s*vocals\s*[)}\]]",  # (with vocals)
     ]
 
     clean_text = text
     for p in patterns:
-        clean_text = re.sub(p, '', clean_text, flags=re.IGNORECASE)
+        clean_text = re.sub(p, "", clean_text, flags=re.IGNORECASE)
 
     # Remove trailing separators often left behind (e.g., "Song - " -> "Song")
-    clean_text = re.sub(r'\s*[-|]\s*$', '', clean_text)
-    clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+    clean_text = re.sub(r"\s*[-|]\s*$", "", clean_text)
+    clean_text = re.sub(r"\s+", " ", clean_text).strip()
     if ".." in clean_text:
-        clean_text = clean_text.replace('..', '.')
+        clean_text = clean_text.replace("..", ".")
 
     return clean_text
+
 
 def show_progress(d):
     """
     Custom hook to show a single-line progress bar.
     Prevents the terminal from scrolling/stacking endlessly.
     """
-    if d['status'] == 'downloading':
-        # Get values
-        p = d.get('_percent_str', '0%').replace('%','')
-        speed = d.get('_speed_str', 'N/A')
-        eta = d.get('_eta_str', 'N/A')
-        filename = d.get('filename', '').split(os.sep)[-1]
+    if d["status"] == "downloading":
+        p = d.get("_percent_str", "0%").replace("%", "")
+        speed = d.get("_speed_str", "N/A")
+        eta = d.get("_eta_str", "N/A")
+        filename = d.get("filename", "").split(os.sep)[-1]
 
-        # Truncate filename if too long
         if len(filename) > 30:
             filename = filename[:27] + "..."
 
@@ -136,20 +147,22 @@ def show_progress(d):
             percent = float(p)
             bar_length = 20
             filled_length = int(bar_length * percent // 100)
-            bar = '█' * filled_length + '-' * (bar_length - filled_length)
+            bar = "█" * filled_length + "-" * (bar_length - filled_length)
         except ValueError:
-            bar = '-' * 20
+            bar = "-" * 20
             p = "??"
 
-        # Print with \r to overwrite the line (Animation effect)
-        sys.stdout.write(f"\r[DOWNLOADING] |{bar}| {p}% | {speed} | ETA: {eta} | {filename}    ")
+        sys.stdout.write(
+            f"\r[DOWNLOADING] |{bar}| {p}% | {speed} | ETA: {eta} | {filename}    "
+        )
         sys.stdout.flush()
 
-    elif d['status'] == 'finished':
-        # Оттестить еще этот момент
-        # Изменить размер с 40  там на 70
-        sys.stdout.write(f"\r[COMPLETE]    |{'█'*20}| 100% | Downloaded! Processing...                     \n")
+    elif d["status"] == "finished":
+        sys.stdout.write(
+            f"\r[COMPLETE]    |{'█' * 20}| 100% | Downloaded! Processing...                     \n"
+        )
         sys.stdout.flush()
+
 
 class BrowserBackend(ABC):
     """
@@ -606,7 +619,6 @@ def clean_tags(filepath: Path) -> None:
                 audio.add(TIT2(encoding=3, text=new_title))
                 print(f"[METADATA] Renamed Title: '{original_title}' -> '{new_title}'")
 
-
         # Save (Force ID3v2.3 for max Windows/Car compatibility)
         audio.save(v1=0, v2_version=3)
         print(f"[CLEANER] Sanitized tags: {filepath.name}")
@@ -631,132 +643,181 @@ def download_audio(
     files_before = set(download_path.glob("*"))
     frag_logger = FragmentLogger()
     has_ffmpeg = is_ffmpeg_installed()
+    browser_strategies = [None, "firefox", "chrome"]
 
-    ydl_opts = {
-        "outtmpl": str(download_path / "%(title)s.%(ext)s"),
-        "restrictfilenames": False,
-        "windowsfilenames": True,
-        "overwrites": True,
-        "verbose": False,
-        "quiet": False,
-        "logger": frag_logger,
-        "progress_hooks": [show_progress],
-        "socket_timeout": 30,
-        "retries": 15,
-        "fragment_retries": 15,
-        "keepfragments": False,
-        "skip_unavailable_fragments": ALLOW_SKIP_FRAGMENTS,
-        "cookiesfrombrowser": ("firefox",),
-        "writethumbnail": False,
-        "noplaylist": True,
-        "parse_metadata": [
-            ":(?P<meta_synopsis>)",
-            ":(?P<meta_description>)",
-            ":(?P<meta_comment>)",
-            ":(?P<meta_purl>)",
-            ":(?P<meta_encoder>)",
-            ":(?P<meta_copyright>)",
-        ],
-        "postprocessors": [],
-        "postprocessor_args": {},
-    }
+    success = False
+    downloaded_files = []
 
-    if has_ffmpeg:
-        ydl_opts["writethumbnail"] = True
+    for current_browser in browser_strategies:
+        if success:
+            break
 
-        ydl_opts["postprocessor_args"] = {
-            "FFmpegExtractAudio": ["-bitexact", "-map_metadata", "-1"],
-            "FFmpegMetadata": ["-id3v2_version", "3", "-write_id3v1", "0"],
-            "EmbedThumbnail": ["-map_metadata", "-1"],
+        browser_name = current_browser if current_browser else "Anonymous (No Cookies)"
+        print(f"\n" + "=" * 50)
+        print(f"[ATTEMPT] Trying download via: {browser_name.upper()}")
+        print("=" * 50)
+
+        ydl_opts = {
+            "outtmpl": str(download_path / "%(title)s.%(ext)s"),
+            "restrictfilenames": False,
+            "windowsfilenames": True,
+            "overwrites": True,
+            "verbose": False,
+            "quiet": False,
+            "logger": frag_logger,
+            "progress_hooks": [show_progress],
+            "socket_timeout": 30,
+            "retries": 15,
+            "fragment_retries": 15,
+            "keepfragments": False,
+            "skip_unavailable_fragments": ALLOW_SKIP_FRAGMENTS,
+            "writethumbnail": False,
+            "noplaylist": True,
+            "extractor_args": {
+                "youtube": {"player_client": ["default", "-web_safari"]}
+            },
+            "parse_metadata": [
+                ":(?P<meta_synopsis>)",
+                ":(?P<meta_description>)",
+                ":(?P<meta_comment>)",
+                ":(?P<meta_purl>)",
+                ":(?P<meta_encoder>)",
+                ":(?P<meta_copyright>)",
+            ],
+            "postprocessors": [],
+            "postprocessor_args": {},
         }
 
-        ydl_opts["postprocessors"] = [
-            {"key": "SponsorBlock"},
-            {
-                "key": "ModifyChapters",
-                "remove_sponsor_segments": [
-                    "sponsor",
-                    "intro",
-                    "outro",
-                    "selfpromo",
-                    "interaction",
-                    "music_offtopic",
-                ],
-            },
-            {"key": "EmbedThumbnail"},
-            {"key": "FFmpegMetadata", "add_metadata": True},
-        ]
-
-        if quality_settings["convert"]:
-            ydl_opts["format"] = "bestaudio/best"
-            ydl_opts["postprocessors"].insert(
-                0,
-                {
-                    "key": "FFmpegExtractAudio",
-                    "preferredcodec": quality_settings["codec"],
-                    # '0' means Best Variable Bitrate (VBR) in FFmpeg/LAME (~240-260 kbps)
-                    "preferredquality": "0",
-                },
-            )
+        if current_browser:
+            ydl_opts["cookiesfrombrowser"] = (current_browser,)
         else:
+            ydl_opts.pop("cookiesfrombrowser", None)
+
+        if has_ffmpeg:
+            ydl_opts["writethumbnail"] = True
+            ydl_opts["postprocessor_args"] = {
+                "FFmpegExtractAudio": ["-bitexact", "-map_metadata", "-1"],
+                "FFmpegMetadata": ["-id3v2_version", "3", "-write_id3v1", "0"],
+                "EmbedThumbnail": ["-map_metadata", "-1"],
+            }
+            ydl_opts["postprocessors"] = [
+                {"key": "SponsorBlock"},
+                {
+                    "key": "ModifyChapters",
+                    "remove_sponsor_segments": [
+                        "sponsor",
+                        "intro",
+                        "outro",
+                        "selfpromo",
+                        "interaction",
+                        "music_offtopic",
+                    ],
+                },
+                {"key": "EmbedThumbnail"},
+                {"key": "FFmpegMetadata", "add_metadata": True},
+            ]
+
+            if quality_settings["convert"]:
+                ydl_opts["format"] = "bestaudio/bestvideo+bestaudio/best"
+                ydl_opts["postprocessors"].insert(
+                    0,
+                    {
+                        "key": "FFmpegExtractAudio",
+                        "preferredcodec": quality_settings["codec"],
+                        "preferredquality": "0",
+                    },
+                )
+            else:
+                ydl_opts["format"] = "bestaudio[ext=m4a]/bestaudio/best"
+        else:
+            print("\n[INFO] FFmpeg not detected. Downloading raw audio only.")
             ydl_opts["format"] = "bestaudio[ext=m4a]/bestaudio/best"
 
-    else:
-        print("\n[INFO] FFmpeg not detected. Downloading raw audio only.")
-        print("       (Metadata, Covers, and SponsorBlock disabled)")
-        ydl_opts["format"] = "bestaudio[ext=m4a]/bestaudio/best"
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                for url in urls:
+                    try:
+                        info = ydl.extract_info(url, download=True)
+                        filename = ydl.prepare_filename(info)
+                        final_path = Path(filename)
 
-    print(f"\n[STARTING] Downloading {len(urls)} items to: {download_path}")
+                        if quality_settings["convert"]:
+                            final_path = final_path.with_suffix(
+                                f".{quality_settings['codec']}"
+                            )
 
-    downloaded_files = []
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            for url in urls:
-                info = ydl.extract_info(url, download=True)
-                filename = ydl.prepare_filename(info)
-                final_path = Path(filename)
+                        downloaded_files.append(final_path)
 
-                if quality_settings["convert"]:
-                    final_path = final_path.with_suffix(f".{quality_settings['codec']}")
+                    except DownloadError as e:
+                        err_msg = str(e)
 
-                downloaded_files.append(final_path)
+                        if "403" in err_msg or "Forbidden" in err_msg:
+                            raise FatalForbiddenError("403 Forbidden (IP Block)")
 
-    except Exception as e:
-        print(f"\n[ERROR] {e}")
+                        if "Requested format is not available" in err_msg:
+                            raise FatalForbiddenError(
+                                "Format Unavailable (Cookie Soft Ban)"
+                            )
 
-    if has_ffmpeg:
-        print("\n" + "="*50)
+                        if (
+                            "Failed to decrypt" in err_msg
+                            or "database is locked" in err_msg
+                        ):
+                            raise FatalForbiddenError(
+                                "Cookie Access Failed (Browser Open/Encrypted)"
+                            )
+
+                        print(f"\n[ERROR] Download failed for {url}: {e}")
+
+            success = True
+
+        except FatalForbiddenError as e:
+            print(f"\n[WARN] Strategy '{browser_name}' failed: {e}")
+            print("[INFO] Switching to next browser strategy...")
+        except Exception as e:
+            print(f"\n[CRITICAL] Unexpected error: {e}")
+            break
+
+    if not success:
+        print("\n[FAILED] All browser strategies failed to download the content.")
+        print("Please check your internet or try updating yt-dlp.")
+
+    if has_ffmpeg and downloaded_files:
+        print("\n" + "=" * 50)
         print("\n[POST-PROCESSING] Cleaning tags and renaming files...")
-        print("="*50)
+        print("=" * 50)
 
         total = len(downloaded_files)
 
         for i, file_path in enumerate(downloaded_files):
-            sys.stdout.write(f"\r[PROCESSING] Item {i+1}/{total}: {file_path.name[:40]}...    ")
+            if not file_path.exists():
+                continue
+
+            sys.stdout.write(
+                f"\r[PROCESSING] Item {i + 1}/{total}: {file_path.name[:40]}...    "
+            )
             sys.stdout.flush()
 
-            if file_path.exists():
-                original_stem = file_path.stem
-                clean_stem = sanitize_text(original_stem)
+            original_stem = file_path.stem
+            clean_stem = sanitize_text(original_stem)
 
-                if clean_stem != original_stem:
-                    new_filename = f"{clean_stem}{file_path.suffix}"
-                    new_path = file_path.parent / new_filename
+            if clean_stem != original_stem:
+                new_filename = f"{clean_stem}{file_path.suffix}"
+                new_path = file_path.parent / new_filename
 
-                    try:
-                        if new_path.exists():
-                            new_path = file_path.parent / f"{clean_stem}_{i}{file_path.suffix}"
+                try:
+                    if new_path.exists():
+                        new_path = (
+                            file_path.parent / f"{clean_stem}_{i}{file_path.suffix}"
+                        )
 
-                        os.rename(file_path, new_path)
-                        print(f"\n[RENAME] {file_path.name} -> {new_path.name}")
+                    os.rename(file_path, new_path)
+                    file_path = new_path
 
-                        downloaded_files[i] = new_path
-                        file_path = new_path
+                except OSError as e:
+                    print(f"[RENAME ERROR] Could not rename {file_path.name}: {e}")
 
-                    except OSError as e:
-                        print(f"[RENAME ERROR] Could not rename {file_path.name}: {e}")
-
-                clean_tags(file_path)
+            clean_tags(file_path)
 
     files_after = set(download_path.glob("*"))
     new_files_count = len(files_after - files_before)

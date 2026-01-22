@@ -11,6 +11,9 @@ It handles the entire process: locating browser profiles, decompressing session 
 *   **Smart Integration:**
     *   **Firefox:** Decompresses `jsonlz4` session files to find active Tab Groups.
     *   **Chrome:** Scrapes active sessions and parses the Bookmarks JSON.
+*   **Fallback System:**
+    *   Automatically rotates download strategies to bypass **403 Forbidden** errors or age restrictions.
+    *   Attempts download anonymously first, then falls back to using browser cookies (Firefox -> Chrome) if the server blocks the request.
 *   **Intelligent Filtering:** Automatically skips YouTube search results, homepages, and duplicate video IDs within a group.
 *   **Format Options:**
     *   **Best MP3:** High quality (~240-320kbps VBR) with ID3 tags.
@@ -38,7 +41,26 @@ The script relies on these libraries:
 *   `mutagen` (Metadata editing)
 *   `lz4` (Decompressing Firefox session files)
 
-## Installation
+## Quick Start (Recommended)
+
+This repository includes helper scripts to automate dependency installation and updates.
+
+### Windows
+1.  Navigate to the `windows` folder.
+2.  Run **`install.bat`** once to install requirements.
+3.  Run **`run.bat`** to start the downloader.
+    *   *Note: `run.bat` automatically updates the core download engine (`yt-dlp`) every time to prevent YouTube errors.*
+
+### Linux / macOS
+1.  Navigate to the `linux` folder (or where the `.sh` files are located).
+2.  Give them execution permission:
+    ```bash
+    chmod +x setup.sh run.sh
+    ```
+3.  Run **`./setup.sh`** once to install requirements.
+4.  Run **`./run.sh`** to start the downloader.
+
+## Manual Installation
 
 1.  **Clone the repository:**
     ```bash
@@ -58,7 +80,12 @@ The script relies on these libraries:
 
     > **Note:** If FFmpeg is missing, the script will default to "Original Audio" mode (no MP3 conversion or cover art).
 
-## Usage
+4.  **Run the Tool:**
+    ```bash
+    python music_download.py
+    ```
+
+## Usage Guide
 
 ### For Mozilla Firefox Users
 1.  Organize your videos into **Tab Groups**.
@@ -72,14 +99,6 @@ Chrome handles session files differently. To ensure your tabs are detected immed
 3.  Run the script and select Google Chrome. It will detect both your active sessions and your bookmark folders.
 
 
-### Running the Tool
-```bash
-python music_download.py
-```
-1.  **Select Browser:** Choose 1 for Firefox or 2 for Chrome.
-2.  **Select Profile:** If you have multiple profiles, choose the active one.
-3.  **Select Group:** Choose the Tab Group or Folder you want to download.
-4.  **Select Quality:** Choose your preferred bitrate.
 
 ## How it works
 
@@ -87,6 +106,7 @@ python music_download.py
 *   **Chrome:**
     *   **Sessions:** Scrapes the binary `Current Session` (SNSS format) using Regex to find YouTube URLs even if the file is partially locked.
     *   **Bookmarks:** Parses the `Bookmarks` JSON file to extract organized folders.
+*   **Downloading:** The script uses yt-dlp with a robust strategy loop. It attempts to download without cookies first. If YouTube returns a 403 Forbidden or Sign-in Required error, it automatically retries using cookies from your local browser profiles to authenticate the request.
 *   **Post-Processing:** Uses `mutagen` to scrub "provided to YouTube" text and technical tags, leaving you with a clean, professional-looking music library.
 
 ## License

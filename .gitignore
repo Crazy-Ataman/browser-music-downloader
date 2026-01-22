@@ -1,9 +1,37 @@
-# Ignore all
-*
+# Python & Runtime
+__pycache__/
+*.py[cod]
+*$py.class
+*.log
 
-# Except
-!.gitignore
-!music_download.py
+# Virtual Environments
+venv/
+.venv/
+env/
+.env
+
+# OS & Editor Metadata
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Ignore the folder where music is downloaded
+downloads/
+
+# Ignore temporary download parts (yt-dlp artifacts)
+*.part
+*.ytdl
+*.f*
+
+#  FFmpeg & Binaries
+*.zip
+ffmpeg.exe
+ffplay.exe
+ffprobe.exe
+
+# Other files
+*.txt
+*.md
 !requirements.txt
 !README.md
-!LICENSE
