@@ -1,9 +1,12 @@
 import os
+import logging
 import json
 import sys
 import re
 import shutil
 import platform
+from dataclasses import dataclass
+import tempfile
 import lz4.block
 from pathlib import Path
 from abc import ABC, abstractmethod
@@ -12,36 +15,84 @@ from yt_dlp.utils import DownloadError
 from mutagen.id3 import ID3, TXXX, COMM, USLT, TSSE, TENC, TYER, TDRC, TDAT, TRCK, TIT2
 from typing import Optional, Dict, List, Any, Set
 
-
+BASE_DIR = Path(__file__).parent.resolve()
 ALLOW_SKIP_FRAGMENTS = False
+
+@dataclass
+class QualityProfile:
+    name: str
+    desc: str
+    codec: Optional[str]
+    quality: Optional[str]
+    convert: bool
+
 QUALITY_OPTIONS = {
-    "1": {
-        "name": "Best MP3 (up to 320kbps)",
-        "desc": "Maximum MP3 quality. Universal compatibility.",
-        "codec": "mp3",
-        "quality": "320",
-        "convert": True,
-    },
-    "2": {
-        "name": "Standard MP3 (192kbps)",
-        "desc": "Smaller file size, good enough for most uses.",
-        "codec": "mp3",
-        "quality": "192",
-        "convert": True,
-    },
-    "3": {
-        "name": "Original Audio (M4A/WebM)",
-        "desc": "Best audio quality (Source). No conversion time.",
-        "codec": None,
-        "quality": None,
-        "convert": False,
-    },
+    "1": QualityProfile(
+        name="Best MP3 (up to 320kbps)",
+        desc="Maximum MP3 quality. Universal compatibility.",
+        codec="mp3",
+        quality="320",
+        convert=True
+    ),
+    "2": QualityProfile(
+        name="Standard MP3 (192kbps)",
+        desc="Smaller file size, good enough for most uses.",
+        codec="mp3",
+        quality="192",
+        convert=True
+    ),
+    "3": QualityProfile(
+        name="Original Audio (M4A/WebM)",
+        desc="Best audio quality (Source). No conversion time.",
+        codec=None,
+        quality=None,
+        convert=False
+    ),
 }
 
+CLEANUP_PATTERNS = [
+    re.compile(r"\s*[({\[]\s*official\s*video\s*[)}\]]", re.IGNORECASE),  # (Official Video)
+    re.compile(r"\s*[({\[]\s*official\s*music\s*video\s*[)}\]]", re.IGNORECASE),  # (Official Music Video)
+    re.compile(r"\s*[({\[]\s*official\s*audio\s*[)}\]]", re.IGNORECASE),  # (Official Audio)
+    re.compile(r"\s*[({\[]\s*official\s*lyric\s*video\s*[)}\]]", re.IGNORECASE),  # (Official Lyric Video)
+    re.compile(r"\s*[({\[]\s*video\s*[)}\]]", re.IGNORECASE),  # (Video)
+    re.compile(r"\s*[({\[]\s*audio\s*[)}\]]", re.IGNORECASE),  # (Audio)
+    re.compile(r"\s*[({\[]\s*lyrics\s*[)}\]]", re.IGNORECASE),  # (Lyrics)
+    re.compile(r"\s*[({\[]\s*visualizer\s*[)}\]]", re.IGNORECASE),  # (Visualizer)
+    re.compile(r"\s*[({\[]\s*hq\s*[)}\]]", re.IGNORECASE),  # (HQ)
+    re.compile(r"\s*[({\[]\s*hd\s*[)}\]]", re.IGNORECASE),  # (HD)
+    re.compile(r"\s*[({\[]\s*4k\s*[)}\]]", re.IGNORECASE),  # (4K)
+    re.compile(r"\s*[({\[]\s*new\s*single\s*[)}\]]", re.IGNORECASE),  # (NEW SINGLE)
+    re.compile(r"\s*[({\[]\s*live\s*@.*?[)}\]]", re.IGNORECASE),  # (Live @ ...)
+    re.compile(r"\s*[({\[]\s*with\s*vocals\s*[)}\]]", re.IGNORECASE),  # (with vocals)
+]
+
+def setup_logging() -> logging.Logger:
+    logger = logging.getLogger("MusicDownloader")
+
+    if logger.hasHandlers():
+        return logger
+
+    logger.setLevel(logging.DEBUG)
+    file_handler = logging.FileHandler("log.txt", mode='w', encoding='utf-8')
+    file_handler.setLevel(logging.DEBUG)
+    file_format = logging.Formatter('%(asctime)s - [%(levelname)s] - %(filename)s:%(lineno)d - %(message)s')
+    file_handler.setFormatter(file_format)
+
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_format = logging.Formatter('%(message)s')
+    console_handler.setFormatter(console_format)
+
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+
+    return logger
+
+log = setup_logging()
 
 class FatalForbiddenError(Exception):
     """Custom exception to stop the script immediately on 403 errors."""
-
     pass
 
 
@@ -66,16 +117,18 @@ class FragmentLogger:
     def warning(self, msg: str) -> None:
         if "fragment" in msg.lower() or "skipping" in msg.lower():
             self.skipped += 1
-            print(f"[WARN] Skipped Fragment: {msg}")
+            log.warning(f"Skipped Fragment: {msg}")
         else:
             self.warnings += 1
 
     def error(self, msg: str) -> None:
         if "403" in msg or "Forbidden" in msg:
-            print("\n[FATAL] HTTP Error 403 Detected! YouTube blocked the connection.")
+            error_msg = "HTTP Error 403 Detected! YouTube blocked the connection."
+            print(f"\n[FATAL] {error_msg}")
+            log.critical(error_msg)
             raise FatalForbiddenError("403 Forbidden")
 
-        print(f"[ERROR] {msg}")
+        log.error(msg)
         self.errors += 1
         # Treat 'fragment not found' as a skip event
         if "fragment" in msg.lower() and "not found" in msg.lower():
@@ -97,27 +150,9 @@ def sanitize_text(text: str) -> str:
     if not text:
         return ""
 
-    # List of patterns to remove (Case insensitive)
-    patterns = [
-        r"\s*[({\[]\s*official\s*video\s*[)}\]]",  # (Official Video)
-        r"\s*[({\[]\s*official\s*music\s*video\s*[)}\]]",  # (Official Music Video)
-        r"\s*[({\[]\s*official\s*audio\s*[)}\]]",  # (Official Audio)
-        r"\s*[({\[]\s*official\s*lyric\s*video\s*[)}\]]",  # (Official Lyric Video)
-        r"\s*[({\[]\s*video\s*[)}\]]",  # (Video)
-        r"\s*[({\[]\s*audio\s*[)}\]]",  # (Audio)
-        r"\s*[({\[]\s*lyrics\s*[)}\]]",  # (Lyrics)
-        r"\s*[({\[]\s*visualizer\s*[)}\]]",  # (Visualizer)
-        r"\s*[({\[]\s*hq\s*[)}\]]",  # (HQ)
-        r"\s*[({\[]\s*hd\s*[)}\]]",  # (HD)
-        r"\s*[({\[]\s*4k\s*[)}\]]",  # (4K)
-        r"\s*[({\[]\s*new\s*single\s*[)}\]]",  # (NEW SINGLE)
-        r"\s*[({\[]\s*live\s*@.*?[)}\]]",  # (Live @ ...)
-        r"\s*[({\[]\s*with\s*vocals\s*[)}\]]",  # (with vocals)
-    ]
-
     clean_text = text
-    for p in patterns:
-        clean_text = re.sub(p, "", clean_text, flags=re.IGNORECASE)
+    for pattern in CLEANUP_PATTERNS:
+        clean_text = re.sub(pattern, "", clean_text)
 
     # Remove trailing separators often left behind (e.g., "Song - " -> "Song")
     clean_text = re.sub(r"\s*[-|]\s*$", "", clean_text)
@@ -159,7 +194,7 @@ def show_progress(d):
 
     elif d["status"] == "finished":
         sys.stdout.write(
-            f"\r[COMPLETE]    |{'█' * 20}| 100% | Downloaded! Processing...                     \n"
+            f"\r[COMPLETE]    |{'█' * 20}| 100% | Downloaded! Processing...                     "
         )
         sys.stdout.flush()
 
@@ -228,6 +263,43 @@ class BrowserBackend(ABC):
 
         return False
 
+    def _safe_read_json(self, path: Path) -> Optional[Dict[str, Any]]:
+        """Copies a file to temp storage before reading to avoid lock errors."""
+        if not path.exists():
+            return None
+
+        with tempfile.NamedTemporaryFile(delete=False) as tmp:
+            temp_path = Path(tmp.name)
+
+        try:
+            shutil.copy2(path, temp_path)
+            with open(temp_path, "rb") as f:
+                content = f.read()
+
+            if content.startswith(b"mozLz40"):
+                # Firefox LZ4
+                try:
+                    decompressed = lz4.block.decompress(content[8:])
+                    return json.loads(decompressed)
+                except Exception as e:
+                    log.debug(f"LZ4 Decompression failed: {e}")
+                    return None
+            else:
+                # Standard JSON (Chrome)
+                try:
+                    return json.loads(content.decode('utf-8'))
+                except Exception as e:
+                    return None
+        except Exception as e:
+            log.warning(f"Safe read failed for {path}: {e}")
+            return None
+        finally:
+            if temp_path.exists():
+                try:
+                    os.unlink(temp_path)
+                except OSError:
+                    pass
+
 
 class FirefoxBrowser(BrowserBackend):
     @property
@@ -274,18 +346,6 @@ class FirefoxBrowser(BrowserBackend):
             )
         return []
 
-    def _load_lz4_json(self, file_path: Path) -> Optional[Dict[str, Any]]:
-        """Decompress Mozilla LZ4 JSON."""
-        try:
-            with open(file_path, "rb") as file:
-                data = file.read()
-                if data[:8] == b"mozLz40\0":
-                    decompressed = lz4.block.decompress(data[8:])
-                    return json.loads(decompressed)
-        except Exception as e:
-            return None
-        return None
-
     def extract_groups(self, profile_path: Path) -> Dict[str, List[str]]:
         """Reads sessionstore/recovery.jsonlz4 to find active Tab Groups."""
         files = [
@@ -296,10 +356,9 @@ class FirefoxBrowser(BrowserBackend):
 
         json_data = None
         for f in files:
-            if f.exists():
-                json_data = self._load_lz4_json(f)
-                if json_data:
-                    break
+            json_data = self._safe_read_json(f)
+            if json_data:
+                break
 
         if not json_data:
             return {}
@@ -429,7 +488,7 @@ class ChromeBrowser(BrowserBackend):
                     except UnicodeDecodeError:
                         continue
         except Exception as e:
-            print(f"[WARN] Could not read Chrome Session file: {e}")
+            log.warning(f"Could not read Chrome Session file: {e}")
 
         return final_urls
 
@@ -441,12 +500,10 @@ class ChromeBrowser(BrowserBackend):
             organized_groups["[Active Session] Open Tabs"] = active_urls
 
         bookmarks_path = profile_path / "Bookmarks"
+        data = self._safe_read_json(bookmarks_path)
 
-        if bookmarks_path.exists():
+        if data:
             try:
-                with open(bookmarks_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-
                 seen_bookmark_vids = set()
 
                 def recurse_nodes(node, current_folder_name=None):
@@ -479,23 +536,23 @@ class ChromeBrowser(BrowserBackend):
                 roots = data.get("roots", {})
                 for root_key in roots:
                     recurse_nodes(roots[root_key])
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning(f"Failed to parse Chrome bookmarks for {profile_path}: {e}")
 
         return organized_groups
 
 
-def ask_quality() -> Optional[Dict[str, Any]]:
+def ask_quality() -> Optional[QualityProfile]:
     """CLI Menu for selecting audio quality."""
     global ALLOW_SKIP_FRAGMENTS
     ffmpeg_available = is_ffmpeg_installed()
     while True:
         print("\n--- Audio Quality Settings ---")
         for key, val in QUALITY_OPTIONS.items():
-            if not ffmpeg_available and val["convert"]:
-                print(f"[{key}] [UNAVAILABLE - Needs FFmpeg] {val['name']}")
+            if not ffmpeg_available and val.convert:
+                print(f"[{key}] [UNAVAILABLE - Needs FFmpeg] {val.name}")
             else:
-                print(f"[{key}] {val['name']} - {val['desc']}")
+                print(f"[{key}] {val.name} - {val.desc}")
 
         skip_status = (
             "ENABLED (Audio may glitch)"
@@ -519,7 +576,8 @@ def ask_quality() -> Optional[Dict[str, Any]]:
         if choice in QUALITY_OPTIONS:
             selected = QUALITY_OPTIONS[choice]
 
-            if selected["convert"] and not ffmpeg_available:
+            if selected.convert and not ffmpeg_available:
+                log.error("FFmpeg is missing!")
                 print("\n[ERROR] FFmpeg is missing!")
                 print("You cannot select MP3 conversion without FFmpeg installed.")
                 print("Please install FFmpeg or select Option 3 (Original Audio).")
@@ -617,14 +675,14 @@ def clean_tags(filepath: Path) -> None:
             new_title = sanitize_text(original_title)
             if new_title != original_title:
                 audio.add(TIT2(encoding=3, text=new_title))
-                print(f"[METADATA] Renamed Title: '{original_title}' -> '{new_title}'")
+                log.info(f"[METADATA] Renamed Title: '{original_title}' -> '{new_title}'")
 
         # Save (Force ID3v2.3 for max Windows/Car compatibility)
         audio.save(v1=0, v2_version=3)
-        print(f"[CLEANER] Sanitized tags: {filepath.name}")
+        log.info(f"[CLEANER] Sanitized tags: {filepath.name}")
 
     except Exception as e:
-        print(f"[CLEANER ERROR] Failed on {filepath.name}: {e}")
+        log.error(f"[CLEANER] Failed on {filepath.name}: {e}")
 
 
 def download_audio(
@@ -637,7 +695,7 @@ def download_audio(
     safe_name = "".join(
         [c for c in group_name if c.isalpha() or c.isdigit() or c == " "]
     ).strip()
-    download_path = Path("downloads") / safe_name
+    download_path = BASE_DIR / "downloads" / safe_name
     download_path.mkdir(parents=True, exist_ok=True)
 
     files_before = set(download_path.glob("*"))
@@ -647,14 +705,17 @@ def download_audio(
 
     success = False
     downloaded_files = []
+    remaining_urls = urls.copy()
 
     for current_browser in browser_strategies:
+        if not remaining_urls:
+            break
         if success:
             break
 
         browser_name = current_browser if current_browser else "Anonymous (No Cookies)"
         print(f"\n" + "=" * 50)
-        print(f"[ATTEMPT] Trying download via: {browser_name.upper()}")
+        log.info(f"[ATTEMPT] Trying download via: {browser_name.upper()}")
         print("=" * 50)
 
         ydl_opts = {
@@ -662,6 +723,7 @@ def download_audio(
             "restrictfilenames": False,
             "windowsfilenames": True,
             "overwrites": True,
+            "force_overwrites": True,
             "verbose": False,
             "quiet": False,
             "logger": frag_logger,
@@ -717,35 +779,38 @@ def download_audio(
                 {"key": "FFmpegMetadata", "add_metadata": True},
             ]
 
-            if quality_settings["convert"]:
+            if quality_settings.convert:
                 ydl_opts["format"] = "bestaudio/bestvideo+bestaudio/best"
                 ydl_opts["postprocessors"].insert(
                     0,
                     {
                         "key": "FFmpegExtractAudio",
-                        "preferredcodec": quality_settings["codec"],
+                        "preferredcodec": quality_settings.codec,
                         "preferredquality": "0",
                     },
                 )
             else:
                 ydl_opts["format"] = "bestaudio[ext=m4a]/bestaudio/best"
         else:
-            print("\n[INFO] FFmpeg not detected. Downloading raw audio only.")
+            log.info("FFmpeg not detected. Downloading raw audio only.")
             ydl_opts["format"] = "bestaudio[ext=m4a]/bestaudio/best"
+
+        succeeded_in_this_pass = []
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                for url in urls:
+                for url in remaining_urls:
                     try:
                         info = ydl.extract_info(url, download=True)
                         filename = ydl.prepare_filename(info)
                         final_path = Path(filename)
 
-                        if quality_settings["convert"]:
+                        if quality_settings.convert:
                             final_path = final_path.with_suffix(
-                                f".{quality_settings['codec']}"
+                                f".{quality_settings.codec}"
                             )
 
+                        succeeded_in_this_pass.append(url)
                         downloaded_files.append(final_path)
 
                     except DownloadError as e:
@@ -753,12 +818,10 @@ def download_audio(
 
                         if "403" in err_msg or "Forbidden" in err_msg:
                             raise FatalForbiddenError("403 Forbidden (IP Block)")
-
                         if "Requested format is not available" in err_msg:
                             raise FatalForbiddenError(
                                 "Format Unavailable (Cookie Soft Ban)"
                             )
-
                         if (
                             "Failed to decrypt" in err_msg
                             or "database is locked" in err_msg
@@ -767,24 +830,38 @@ def download_audio(
                                 "Cookie Access Failed (Browser Open/Encrypted)"
                             )
 
-                        print(f"\n[ERROR] Download failed for {url}: {e}")
+                        log.error(f"Download failed for {url}: {e}")
+
+                    except PermissionError as e:
+                            log.error(f"Windows locked the file (Antivirus/FFmpeg race condition): {e}")
+                            print(f"\n[ERROR] File locked by Windows. Skipping: {url}")
+
+                    except Exception as e:
+                        log.error(f"Failed to process {url}: {e}", exc_info=True)
+                        print(f"\n[ERROR] Skipped due to error: {e}")
 
             success = True
 
         except FatalForbiddenError as e:
+            log.warning(f"\n[WARN] Strategy '{browser_name}' failed: {e}")
+            log.info("[INFO] Switching to next browser strategy...")
             print(f"\n[WARN] Strategy '{browser_name}' failed: {e}")
             print("[INFO] Switching to next browser strategy...")
         except Exception as e:
-            print(f"\n[CRITICAL] Unexpected error: {e}")
+            log.error(f"Unexpected error during download loop: {e}", exc_info=True)
             break
 
+        for url in succeeded_in_this_pass:
+            if url in remaining_urls:
+                remaining_urls.remove(url)
+
     if not success:
-        print("\n[FAILED] All browser strategies failed to download the content.")
-        print("Please check your internet or try updating yt-dlp.")
+        log.warning("All browser strategies failed to download the content.")
+        log.info("Please check your internet or try updating yt-dlp.")
 
     if has_ffmpeg and downloaded_files:
         print("\n" + "=" * 50)
-        print("\n[POST-PROCESSING] Cleaning tags and renaming files...")
+        log.info("[POST-PROCESSING] Cleaning tags and renaming files...")
         print("=" * 50)
 
         total = len(downloaded_files)
@@ -793,9 +870,7 @@ def download_audio(
             if not file_path.exists():
                 continue
 
-            sys.stdout.write(
-                f"\r[PROCESSING] Item {i + 1}/{total}: {file_path.name[:40]}...    "
-            )
+            log.info(f"[PROCESSING] Item {i + 1}/{total}: {file_path.name}...    ")
             sys.stdout.flush()
 
             original_stem = file_path.stem
@@ -815,6 +890,7 @@ def download_audio(
                     file_path = new_path
 
                 except OSError as e:
+                    log.error(f"Could not rename {file_path.name}: {e}")
                     print(f"[RENAME ERROR] Could not rename {file_path.name}: {e}")
 
             clean_tags(file_path)
@@ -954,12 +1030,15 @@ def main() -> None:
 
                     try:
                         target_group = group_names[int(choice_input) - 1]
+                        log.info(f"User selected Group: '{target_group}' containing {len(valid_groups[target_group])} links.")
                     except (ValueError, IndexError):
                         continue
 
                     quality = ask_quality()
                     if quality is None:
                         continue
+
+                    log.info(f"User selected Quality: {quality.name} (Convert: {quality.convert})")
 
                     stats = download_audio(
                         valid_groups[target_group], target_group, quality

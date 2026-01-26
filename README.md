@@ -14,6 +14,7 @@ It handles the entire process: locating browser profiles, decompressing session 
 *   **Fallback System:**
     *   Automatically rotates download strategies to bypass **403 Forbidden** errors or age restrictions.
     *   Attempts download anonymously first, then falls back to using browser cookies (Firefox -> Chrome) if the server blocks the request.
+    *   Retries failed fragments while skipping successfully downloaded files
 *   **Intelligent Filtering:** Automatically skips YouTube search results, homepages, and duplicate video IDs within a group.
 *   **Format Options:**
     *   **Best MP3:** High quality (~240-320kbps VBR) with ID3 tags.
@@ -102,6 +103,8 @@ Chrome handles session files differently. To ensure your tabs are detected immed
 
 ## How it works
 
+
+*   **Safe Reading:** The script copies browser configuration files to a temporary directory before reading them. This prevents file locking errors ("File used by another process") when the browser is currently running.
 *   **Firefox:** Reads `recovery.jsonlz4`. It decompresses the LZ4 stream, skips the proprietary Mozilla header, and parses the JSON structure to find group titles and tab URLs.
 *   **Chrome:**
     *   **Sessions:** Scrapes the binary `Current Session` (SNSS format) using Regex to find YouTube URLs even if the file is partially locked.
