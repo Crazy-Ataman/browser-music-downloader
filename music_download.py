@@ -1,5 +1,6 @@
 import os
 import logging
+from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
 import json
 import sys
 import re
@@ -17,6 +18,13 @@ from typing import Optional, Dict, List, Any, Set
 
 BASE_DIR = Path(__file__).parent.resolve()
 ALLOW_SKIP_FRAGMENTS = False
+
+LOG_ROTATION_MODE = "size"
+LOG_FILE_MAX_BYTES = 5 * 1024 * 1024
+LOG_FILE_BACKUP_COUNT = 5
+LOG_TIME_WHEN = "midnight"
+LOG_TIME_INTERVAL = 1
+LOG_TIME_BACKUP_COUNT = 30
 
 @dataclass
 class QualityProfile:
@@ -74,7 +82,29 @@ def setup_logging() -> logging.Logger:
         return logger
 
     logger.setLevel(logging.DEBUG)
-    file_handler = logging.FileHandler("log.txt", mode='w', encoding='utf-8')
+    logs_dir = BASE_DIR / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+
+    log_file_path = logs_dir / "log.txt"
+
+    if LOG_ROTATION_MODE == "size":
+        file_handler = RotatingFileHandler(
+            log_file_path,
+            maxBytes=LOG_FILE_MAX_BYTES,
+            backupCount=LOG_FILE_BACKUP_COUNT,
+            encoding="utf-8",
+        )
+    elif LOG_ROTATION_MODE == "time":
+        file_handler = TimedRotatingFileHandler(
+            log_file_path,
+            when=LOG_TIME_WHEN,
+            interval=LOG_TIME_INTERVAL,
+            backupCount=LOG_TIME_BACKUP_COUNT,
+            encoding="utf-8",
+        )
+    else:
+        file_handler = logging.FileHandler(log_file_path, mode="w", encoding="utf-8")
+
     file_handler.setLevel(logging.DEBUG)
     file_format = logging.Formatter('%(asctime)s - [%(levelname)s] - %(filename)s:%(lineno)d - %(message)s')
     file_handler.setFormatter(file_format)
@@ -86,6 +116,7 @@ def setup_logging() -> logging.Logger:
 
     logger.addHandler(file_handler)
     logger.addHandler(console_handler)
+    logger.propagate = False
 
     return logger
 
@@ -546,6 +577,10 @@ def ask_quality() -> Optional[QualityProfile]:
     """CLI Menu for selecting audio quality."""
     global ALLOW_SKIP_FRAGMENTS
     ffmpeg_available = is_ffmpeg_installed()
+    log.info(
+        "Opening quality selection menu (FFmpeg available: %s)",
+        ffmpeg_available,
+    )
     while True:
         print("\n--- Audio Quality Settings ---")
         for key, val in QUALITY_OPTIONS.items():
@@ -570,6 +605,9 @@ def ask_quality() -> Optional[QualityProfile]:
 
         if choice == "s":
             ALLOW_SKIP_FRAGMENTS = not ALLOW_SKIP_FRAGMENTS
+            log.info(
+                "User toggled skip missing fragments to: %s", ALLOW_SKIP_FRAGMENTS
+            )
             print("Setting updated.")
             continue
 
@@ -577,7 +615,7 @@ def ask_quality() -> Optional[QualityProfile]:
             selected = QUALITY_OPTIONS[choice]
 
             if selected.convert and not ffmpeg_available:
-                log.error("FFmpeg is missing!")
+                log.error("FFmpeg is missing! Cannot convert to %s.", selected.codec)
                 print("\n[ERROR] FFmpeg is missing!")
                 print("You cannot select MP3 conversion without FFmpeg installed.")
                 print("Please install FFmpeg or select Option 3 (Original Audio).")
@@ -686,12 +724,21 @@ def clean_tags(filepath: Path) -> None:
 
 
 def download_audio(
-    urls: List[str], group_name: str, quality_settings: Dict[str, Any]
+    urls: List[str], group_name: str, quality_settings: QualityProfile
 ) -> Dict[str, int]:
     """
     Orchestrates the download process using yt-dlp.
     Handles filename generation, conversions, and metadata post-processing.
     """
+    log.info(
+        "Starting download for group '%s' with %d URL(s). Quality: %s (convert=%s, codec=%s)",
+        group_name,
+        len(urls),
+        quality_settings.name,
+        quality_settings.convert,
+        quality_settings.codec,
+    )
+
     safe_name = "".join(
         [c for c in group_name if c.isalpha() or c.isdigit() or c == " "]
     ).strip()
@@ -812,6 +859,11 @@ def download_audio(
 
                         succeeded_in_this_pass.append(url)
                         downloaded_files.append(final_path)
+                        log.info(
+                            "[SUCCESS] Downloaded '%s' via %s",
+                            final_path.name,
+                            browser_name.upper(),
+                        )
 
                     except DownloadError as e:
                         err_msg = str(e)
@@ -833,8 +885,12 @@ def download_audio(
                         log.error(f"Download failed for {url}: {e}")
 
                     except PermissionError as e:
-                            log.error(f"Windows locked the file (Antivirus/FFmpeg race condition): {e}")
-                            print(f"\n[ERROR] File locked by Windows. Skipping: {url}")
+                        log.error(
+                            "Windows locked the file (Antivirus/FFmpeg race condition) for URL %s: %s",
+                            url,
+                            e,
+                        )
+                        print(f"\n[ERROR] File locked by Windows. Skipping: {url}")
 
                     except Exception as e:
                         log.error(f"Failed to process {url}: {e}", exc_info=True)
@@ -906,8 +962,10 @@ def download_audio(
 
 
 def main() -> None:
+    log.info("Music Downloader started. Base directory: %s", BASE_DIR)
     try:
         browsers = [FirefoxBrowser(), ChromeBrowser()]
+        log.info("Detected browser backends: %s", ", ".join(b.name for b in browsers))
 
         while True:
             clear_screen()
@@ -933,11 +991,14 @@ def main() -> None:
             except (ValueError, IndexError):
                 continue
 
+            log.info("User selected browser backend: %s", backend.name)
             profiles = backend.get_profiles()
+
             if not profiles:
-                print(f"\nNo profiles found for {backend.name}.")
-                input("Press Enter to back...")
-                continue
+                    log.warning("No profiles found for backend: %s", backend.name)
+                    print(f"\nNo profiles found for {backend.name}.")
+                    input("Press Enter to back...")
+                    continue
 
             current_profile_idx = 0
             back_to_browser_menu = False
@@ -956,6 +1017,11 @@ def main() -> None:
                     print("-" * 40)
                     print("Reading data...")
 
+                    log.info(
+                        "Reading data for profile '%s' at path '%s'",
+                        selected_profile.name,
+                        selected_profile,
+                    )
                     groups = backend.extract_groups(selected_profile)
 
                     valid_groups = {}
@@ -967,6 +1033,11 @@ def main() -> None:
                             valid_groups[name] = yt_links
 
                     if not valid_groups:
+                        log.info(
+                            "No valid YouTube groups found for profile '%s' (%s)",
+                            selected_profile.name,
+                            backend.name,
+                        )
                         print("\nNo YouTube links found in this profile's Bookmarks.")
 
                         if backend.name == "Google Chrome":
@@ -1005,6 +1076,11 @@ def main() -> None:
                         continue
 
                     group_names = list(valid_groups.keys())
+                    log.info(
+                        "Found %d group(s)/folder(s) for profile '%s'.",
+                        len(group_names),
+                        selected_profile.name,
+                    )
                     print(f"\nFound Groups/Folders:")
                     for i, name in enumerate(group_names):
                         print(f"[{i + 1}] {name} ({len(valid_groups[name])} videos)")
@@ -1030,7 +1106,11 @@ def main() -> None:
 
                     try:
                         target_group = group_names[int(choice_input) - 1]
-                        log.info(f"User selected Group: '{target_group}' containing {len(valid_groups[target_group])} links.")
+                        log.info(
+                            "User selected group '%s' containing %d link(s).",
+                            target_group,
+                            len(valid_groups[target_group]),
+                        )
                     except (ValueError, IndexError):
                         continue
 
@@ -1044,13 +1124,26 @@ def main() -> None:
                         valid_groups[target_group], target_group, quality
                     )
 
+                    log.info(
+                        "Download finished for group '%s'. New files: %d, skipped fragments: %d, warnings: %d",
+                        target_group,
+                        stats.get("new_files", 0),
+                        stats.get("skipped_fragments", 0),
+                        stats.get("warnings", 0),
+                    )
+
                     print(f"Downloaded {stats['new_files']} files")
                     print("\nJob Complete.")
                     input("Press Enter to continue...")
 
     except KeyboardInterrupt:
+        log.info("Execution interrupted by user via KeyboardInterrupt.")
         sys.exit(0)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        log.exception("Unhandled exception in Music Downloader: %s", e)
+        sys.exit(1)

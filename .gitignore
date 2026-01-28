@@ -19,6 +19,9 @@ Thumbs.db
 # Ignore the folder where music is downloaded
 downloads/
 
+# Ignore the folder where logs are stored
+logs/
+
 # Ignore temporary download parts (yt-dlp artifacts)
 *.part
 *.ytdl

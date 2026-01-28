@@ -88,6 +88,16 @@ This repository includes helper scripts to automate dependency installation and 
 
 ## Usage Guide
 
+### Logging & Diagnostics
+
+*   **Log location:** All diagnostic output is written to the `logs/log.txt` file next to `music_download.py`. The `logs` folder is created automatically and is ignored by git.
+*   **Log levels:** The script logs **DEBUG+** to the file (for full diagnostics) and **INFO+** to the console (to avoid noisy terminal output).
+*   **Rotation:** Log files are automatically rotated to avoid a single huge `log.txt`. By default, rotation is **size-based**; you can switch to **time-based** rotation or disable rotation entirely via the constants at the top of `music_download.py`:
+    *   `LOG_ROTATION_MODE = "size"` – rotate when the log reaches `LOG_FILE_MAX_BYTES`, keep `LOG_FILE_BACKUP_COUNT` old files.
+    *   `LOG_ROTATION_MODE = "time"` – rotate at `LOG_TIME_WHEN` every `LOG_TIME_INTERVAL`, keep `LOG_TIME_BACKUP_COUNT` old files.
+    *   `LOG_ROTATION_MODE = None` – single `logs/log.txt` file (overwritten on each run).
+*   **Crash reporting:** Any unexpected, unhandled exception is logged (with full traceback) before the script exits, making it easier to diagnose rare failures.
+
 ### For Mozilla Firefox Users
 1.  Organize your videos into **Tab Groups**.
 2.  Run the script and select Firefox.
