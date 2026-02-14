@@ -2,20 +2,15 @@
 TITLE Browser Music Downloader - Setup
 CLS
 
-:: ------------------------------------------------------
-:: FIX: Switch context to Project Root (One level up)
-:: 1. Go to the folder containing this .bat file
 cd /d "%~dp0"
-:: 2. Go up one level to find the .py file and requirements
 cd ..
-:: ------------------------------------------------------
+
 
 echo ==================================================
 echo      Browser Music Downloader - Initial Setup
 echo ==================================================
 echo.
 
-:: 1. Check if Python is installed
 python --version >nul 2>&1
 if %errorlevel% neq 0 (
     echo [ERROR] Python is not detected!
@@ -28,12 +23,10 @@ if %errorlevel% neq 0 (
 )
 echo [OK] Python is detected.
 
-:: 2. Upgrade pip and install requirements
 echo.
 echo [INFO] Installing/Updating dependencies...
 python -m pip install --upgrade pip
-:: Now works because we moved to the parent directory
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 if %errorlevel% neq 0 (
     echo.
     echo [ERROR] Failed to install dependencies. Check your internet connection.
@@ -41,7 +34,6 @@ if %errorlevel% neq 0 (
     exit
 )
 
-:: 3. Check for FFmpeg
 echo.
 echo [INFO] Checking for FFmpeg...
 ffmpeg -version >nul 2>&1
@@ -56,6 +48,26 @@ if %errorlevel% neq 0 (
     echo.
 ) else (
     echo [OK] FFmpeg is detected!
+)
+
+echo.
+echo [INFO] Checking for Deno (JavaScript runtime for YouTube signature solving)...
+where.exe deno >nul 2>&1
+if %errorlevel% neq 0 (
+    echo.
+    echo [WARNING] Deno is NOT found in your system PATH.
+    echo.
+    echo YouTube signature solving may fail without Deno.
+    echo To install Deno:
+    echo   1. Run: install_deno.bat (in this folder)
+    echo   2. Or visit: https://deno.land
+    echo   3. Or run: powershell -Command "irm https://deno.land/install.ps1 | iex"
+    echo.
+    echo After installation, restart your terminal.
+    echo.
+) else (
+    echo [OK] Deno is detected!
+    deno --version
 )
 
 echo.

@@ -31,10 +31,10 @@ It handles the entire process: locating browser profiles, decompressing session 
 
 To use this tool fully, you need the following:
 
-
 1.  **Python 3.8+**
 2.  **A Supported Browser:** Mozilla Firefox or Google Chrome.
 3.  **FFmpeg** (Required for MP3 conversion and metadata embedding).
+4.  **Deno** (Optional but recommended). The [Deno](https://deno.land) JavaScript runtime improves YouTube signature solving and can prevent "no format" or 403-style failures. On Windows, run `windows\install_deno.bat` to install it; the main installer will warn if Deno is missing.
 
 ### Python Dependencies
 The script relies on these libraries:
@@ -48,8 +48,9 @@ This repository includes helper scripts to automate dependency installation and 
 
 ### Windows
 1.  Navigate to the `windows` folder.
-2.  Run **`install.bat`** once to install requirements.
-3.  Run **`run.bat`** to start the downloader.
+2.  Run **`install.bat`** once to install requirements (Python deps, FFmpeg check, and optional Deno check).
+3.  *(Optional)* If Deno is not installed, run **`install_deno.bat`** for better YouTube compatibility, then restart your terminal.
+4.  Run **`run.bat`** to start the downloader.
     *   *Note: `run.bat` automatically updates the core download engine (`yt-dlp`) every time to prevent YouTube errors.*
 
 ### Linux / macOS
@@ -92,7 +93,7 @@ This repository includes helper scripts to automate dependency installation and 
 
 *   **Log location:** All diagnostic output is written to the `logs/log.txt` file next to `music_download.py`. The `logs` folder is created automatically and is ignored by git.
 *   **Log levels:** The script logs **DEBUG+** to the file (for full diagnostics) and **INFO+** to the console (to avoid noisy terminal output).
-*   **Rotation:** Log files are automatically rotated to avoid a single huge `log.txt`. By default, rotation is **size-based**; you can switch to **time-based** rotation or disable rotation entirely via the constants at the top of `music_download.py`:
+*   **Rotation:** Log files are automatically rotated to avoid a single huge `log.txt`. By default, rotation is **size-based**; you can switch to **time-based** rotation or disable rotation entirely via the constants in the `config` module:
     *   `LOG_ROTATION_MODE = "size"` – rotate when the log reaches `LOG_FILE_MAX_BYTES`, keep `LOG_FILE_BACKUP_COUNT` old files.
     *   `LOG_ROTATION_MODE = "time"` – rotate at `LOG_TIME_WHEN` every `LOG_TIME_INTERVAL`, keep `LOG_TIME_BACKUP_COUNT` old files.
     *   `LOG_ROTATION_MODE = None` – single `logs/log.txt` file (overwritten on each run).
@@ -111,8 +112,15 @@ Chrome handles session files differently. To ensure your tabs are detected immed
 
 
 
-## How it works
+## Project structure
 
+The codebase is split into modules for clarity and maintainability:
+*   **`app_logging`** – Logging setup, rotation, and the custom `FragmentLogger` used by yt-dlp.
+*   **`browsers`** – Browser backends (Firefox, Chrome) for profile detection and tab/session extraction.
+*   **`config`** – Constants: quality profiles, log rotation settings, and title-cleanup patterns.
+*   **`music_download.py`** – Main entry point: CLI, download orchestration, and metadata post-processing.
+
+## How it works
 
 *   **Safe Reading:** The script copies browser configuration files to a temporary directory before reading them. This prevents file locking errors ("File used by another process") when the browser is currently running.
 *   **Firefox:** Reads `recovery.jsonlz4`. It decompresses the LZ4 stream, skips the proprietary Mozilla header, and parses the JSON structure to find group titles and tab URLs.

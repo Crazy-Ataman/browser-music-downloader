@@ -1,169 +1,16 @@
 import os
-import logging
-from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
-import json
 import sys
 import re
 import shutil
-import platform
-from dataclasses import dataclass
-import tempfile
-import lz4.block
 from pathlib import Path
-from abc import ABC, abstractmethod
+from typing import Dict, List, Optional
 import yt_dlp
 from yt_dlp.utils import DownloadError
-from mutagen.id3 import ID3, TXXX, COMM, USLT, TSSE, TENC, TYER, TDRC, TDAT, TRCK, TIT2
-from typing import Optional, Dict, List, Any, Set
-
-BASE_DIR = Path(__file__).parent.resolve()
-ALLOW_SKIP_FRAGMENTS = False
-
-LOG_ROTATION_MODE = "size"
-LOG_FILE_MAX_BYTES = 5 * 1024 * 1024
-LOG_FILE_BACKUP_COUNT = 5
-LOG_TIME_WHEN = "midnight"
-LOG_TIME_INTERVAL = 1
-LOG_TIME_BACKUP_COUNT = 30
-
-@dataclass
-class QualityProfile:
-    name: str
-    desc: str
-    codec: Optional[str]
-    quality: Optional[str]
-    convert: bool
-
-QUALITY_OPTIONS = {
-    "1": QualityProfile(
-        name="Best MP3 (up to 320kbps)",
-        desc="Maximum MP3 quality. Universal compatibility.",
-        codec="mp3",
-        quality="320",
-        convert=True
-    ),
-    "2": QualityProfile(
-        name="Standard MP3 (192kbps)",
-        desc="Smaller file size, good enough for most uses.",
-        codec="mp3",
-        quality="192",
-        convert=True
-    ),
-    "3": QualityProfile(
-        name="Original Audio (M4A/WebM)",
-        desc="Best audio quality (Source). No conversion time.",
-        codec=None,
-        quality=None,
-        convert=False
-    ),
-}
-
-CLEANUP_PATTERNS = [
-    re.compile(r"\s*[({\[]\s*official\s*video\s*[)}\]]", re.IGNORECASE),  # (Official Video)
-    re.compile(r"\s*[({\[]\s*official\s*music\s*video\s*[)}\]]", re.IGNORECASE),  # (Official Music Video)
-    re.compile(r"\s*[({\[]\s*official\s*audio\s*[)}\]]", re.IGNORECASE),  # (Official Audio)
-    re.compile(r"\s*[({\[]\s*official\s*lyric\s*video\s*[)}\]]", re.IGNORECASE),  # (Official Lyric Video)
-    re.compile(r"\s*[({\[]\s*video\s*[)}\]]", re.IGNORECASE),  # (Video)
-    re.compile(r"\s*[({\[]\s*audio\s*[)}\]]", re.IGNORECASE),  # (Audio)
-    re.compile(r"\s*[({\[]\s*lyrics\s*[)}\]]", re.IGNORECASE),  # (Lyrics)
-    re.compile(r"\s*[({\[]\s*visualizer\s*[)}\]]", re.IGNORECASE),  # (Visualizer)
-    re.compile(r"\s*[({\[]\s*hq\s*[)}\]]", re.IGNORECASE),  # (HQ)
-    re.compile(r"\s*[({\[]\s*hd\s*[)}\]]", re.IGNORECASE),  # (HD)
-    re.compile(r"\s*[({\[]\s*4k\s*[)}\]]", re.IGNORECASE),  # (4K)
-    re.compile(r"\s*[({\[]\s*new\s*single\s*[)}\]]", re.IGNORECASE),  # (NEW SINGLE)
-    re.compile(r"\s*[({\[]\s*live\s*@.*?[)}\]]", re.IGNORECASE),  # (Live @ ...)
-    re.compile(r"\s*[({\[]\s*with\s*vocals\s*[)}\]]", re.IGNORECASE),  # (with vocals)
-]
-
-def setup_logging() -> logging.Logger:
-    logger = logging.getLogger("MusicDownloader")
-
-    if logger.hasHandlers():
-        return logger
-
-    logger.setLevel(logging.DEBUG)
-    logs_dir = BASE_DIR / "logs"
-    logs_dir.mkdir(parents=True, exist_ok=True)
-
-    log_file_path = logs_dir / "log.txt"
-
-    if LOG_ROTATION_MODE == "size":
-        file_handler = RotatingFileHandler(
-            log_file_path,
-            maxBytes=LOG_FILE_MAX_BYTES,
-            backupCount=LOG_FILE_BACKUP_COUNT,
-            encoding="utf-8",
-        )
-    elif LOG_ROTATION_MODE == "time":
-        file_handler = TimedRotatingFileHandler(
-            log_file_path,
-            when=LOG_TIME_WHEN,
-            interval=LOG_TIME_INTERVAL,
-            backupCount=LOG_TIME_BACKUP_COUNT,
-            encoding="utf-8",
-        )
-    else:
-        file_handler = logging.FileHandler(log_file_path, mode="w", encoding="utf-8")
-
-    file_handler.setLevel(logging.DEBUG)
-    file_format = logging.Formatter('%(asctime)s - [%(levelname)s] - %(filename)s:%(lineno)d - %(message)s')
-    file_handler.setFormatter(file_format)
-
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.INFO)
-    console_format = logging.Formatter('%(message)s')
-    console_handler.setFormatter(console_format)
-
-    logger.addHandler(file_handler)
-    logger.addHandler(console_handler)
-    logger.propagate = False
-
-    return logger
-
-log = setup_logging()
-
-class FatalForbiddenError(Exception):
-    """Custom exception to stop the script immediately on 403 errors."""
-    pass
-
-
-class FragmentLogger:
-    """
-    Custom logger for yt-dlp to track missing video fragments/blocks.
-    Crucial for identifying if a download is corrupt/incomplete.
-    """
-
-    def __init__(self) -> None:
-        self.skipped = 0
-        self.errors = 0
-        self.warnings = 0
-
-    def debug(self, msg: str) -> None:
-        if "fragment" in msg.lower() and "skipping" in msg.lower():
-            self.skipped += 1
-
-    def info(self, msg: str) -> None:
-        pass
-
-    def warning(self, msg: str) -> None:
-        if "fragment" in msg.lower() or "skipping" in msg.lower():
-            self.skipped += 1
-            log.warning(f"Skipped Fragment: {msg}")
-        else:
-            self.warnings += 1
-
-    def error(self, msg: str) -> None:
-        if "403" in msg or "Forbidden" in msg:
-            error_msg = "HTTP Error 403 Detected! YouTube blocked the connection."
-            print(f"\n[FATAL] {error_msg}")
-            log.critical(error_msg)
-            raise FatalForbiddenError("403 Forbidden")
-
-        log.error(msg)
-        self.errors += 1
-        # Treat 'fragment not found' as a skip event
-        if "fragment" in msg.lower() and "not found" in msg.lower():
-            self.skipped += 1
+from mutagen.id3 import ID3, TYER, TIT2
+import app_logging
+import config
+from app_logging import FatalForbiddenError, FragmentLogger, init as init_logging
+from browsers import ChromeBrowser, FirefoxBrowser
 
 
 def clear_screen() -> None:
@@ -176,13 +23,31 @@ def is_ffmpeg_installed() -> bool:
     return shutil.which("ffmpeg") is not None
 
 
+def is_deno_installed() -> bool:
+    """Checks if Deno JavaScript runtime is available in the system PATH."""
+    return shutil.which("deno") is not None
+
+
+def get_deno_path() -> Optional[str]:
+    """Returns the path to Deno if available, None otherwise."""
+    deno_path = shutil.which("deno")
+    if deno_path:
+        return deno_path
+    # Check common installation locations
+    user_home = Path.home()
+    deno_bin = user_home / ".deno" / "bin" / "deno.exe"
+    if deno_bin.exists():
+        return str(deno_bin)
+    return None
+
+
 def sanitize_text(text: str) -> str:
     """Removes common YouTube junk text from titles/filenames."""
     if not text:
         return ""
 
     clean_text = text
-    for pattern in CLEANUP_PATTERNS:
+    for pattern in config.CLEANUP_PATTERNS:
         clean_text = re.sub(pattern, "", clean_text)
 
     # Remove trailing separators often left behind (e.g., "Song - " -> "Song")
@@ -230,360 +95,16 @@ def show_progress(d):
         sys.stdout.flush()
 
 
-class BrowserBackend(ABC):
-    """
-    Abstract base class for adding future browsers (Edge, Brave, Opera, etc).
-    """
-
-    @property
-    @abstractmethod
-    def name(self) -> str:
-        pass
-
-    @abstractmethod
-    def get_profiles(self) -> List[Path]:
-        """Returns a list of Path objects representing browser profiles."""
-        pass
-
-    @abstractmethod
-    def extract_groups(self, profile_path: Path) -> Dict[str, List[str]]:
-        """
-        Returns a dict: {'Group Name': [url1, url2, ...]}
-        """
-        pass
-
-    def _extract_video_id(self, url: str) -> Optional[str]:
-        """Shared utility to extract video ID from URL."""
-        if "youtube.com/watch" in url:
-            match = re.search(r"[?&]v=([^&]+)", url)
-            return match.group(1) if match else None
-        elif "youtu.be/" in url:
-            return url.split("youtu.be/")[1].split("?")[0]
-        elif "youtube.com/shorts/" in url:
-            return url.split("shorts/")[1].split("?")[0]
-        return None
-
-    def _is_youtube_video(self, url: str) -> bool:
-        """Shared utility to check if a URL is a valid video (not search/home)."""
-        if not url:
-            return False
-
-        if "youtube.com" not in url and "youtu.be" not in url:
-            return False
-
-        # Blacklist search, results, and settings pages
-        if any(
-            x in url
-            for x in [
-                "search_query=",
-                "/results",
-                "accounts.google",
-                "google.com/settings",
-            ]
-        ):
-            return False
-
-        # Ignore the home page
-        clean_check = url.replace("www.", "").replace("https://", "").strip("/")
-        if clean_check == "youtube.com":
-            return False
-
-        # Must be a watch link, short, or shortened link
-        if "/watch" in url or "/shorts/" in url or "youtu.be" in url:
-            return True
-
-        return False
-
-    def _safe_read_json(self, path: Path) -> Optional[Dict[str, Any]]:
-        """Copies a file to temp storage before reading to avoid lock errors."""
-        if not path.exists():
-            return None
-
-        with tempfile.NamedTemporaryFile(delete=False) as tmp:
-            temp_path = Path(tmp.name)
-
-        try:
-            shutil.copy2(path, temp_path)
-            with open(temp_path, "rb") as f:
-                content = f.read()
-
-            if content.startswith(b"mozLz40"):
-                # Firefox LZ4
-                try:
-                    decompressed = lz4.block.decompress(content[8:])
-                    return json.loads(decompressed)
-                except Exception as e:
-                    log.debug(f"LZ4 Decompression failed: {e}")
-                    return None
-            else:
-                # Standard JSON (Chrome)
-                try:
-                    return json.loads(content.decode('utf-8'))
-                except Exception as e:
-                    return None
-        except Exception as e:
-            log.warning(f"Safe read failed for {path}: {e}")
-            return None
-        finally:
-            if temp_path.exists():
-                try:
-                    os.unlink(temp_path)
-                except OSError:
-                    pass
-
-
-class FirefoxBrowser(BrowserBackend):
-    @property
-    def name(self) -> str:
-        return "Mozilla Firefox"
-
-    def get_profiles(self) -> List[Path]:
-        """Locates Firefox profiles (Standard, Snap, Flatpak)."""
-        system = platform.system()
-        potential_base_paths = []
-
-        if system == "Windows":
-            potential_base_paths.append(
-                Path(os.getenv("APPDATA")) / "Mozilla" / "Firefox" / "Profiles"
-            )
-        elif system == "Darwin":
-            potential_base_paths.append(
-                Path.home() / "Library" / "Application Support" / "Firefox" / "Profiles"
-            )
-        elif system == "Linux":
-            potential_base_paths.append(Path.home() / ".mozilla" / "firefox")
-            potential_base_paths.append(
-                Path.home() / "snap" / "firefox" / "common" / ".mozilla" / "firefox"
-            )
-            potential_base_paths.append(
-                Path.home()
-                / ".var"
-                / "app"
-                / "org.mozilla.firefox"
-                / ".mozilla"
-                / "firefox"
-            )
-
-        valid_profiles = []
-        for base in potential_base_paths:
-            if base.exists():
-                # Get all subdirectories that look like profiles
-                valid_profiles.extend([p for p in base.glob("*.*") if p.is_dir()])
-
-        # Return sorted by modification time (newest first)
-        if valid_profiles:
-            return sorted(
-                valid_profiles, key=lambda p: os.path.getmtime(p), reverse=True
-            )
-        return []
-
-    def extract_groups(self, profile_path: Path) -> Dict[str, List[str]]:
-        """Reads sessionstore/recovery.jsonlz4 to find active Tab Groups."""
-        files = [
-            profile_path / "sessionstore-backups" / "recovery.jsonlz4",
-            profile_path / "sessionstore-backups" / "previous.jsonlz4",
-            profile_path / "sessionstore.jsonlz4",
-        ]
-
-        json_data = None
-        for f in files:
-            json_data = self._safe_read_json(f)
-            if json_data:
-                break
-
-        if not json_data:
-            return {}
-
-        organized_groups = {}
-        seen_video_ids = set()
-
-        if "windows" not in json_data:
-            return {}
-
-        for window in json_data["windows"]:
-            group_metadata = {}
-            raw_groups = window.get("groups", [])
-
-            for g in raw_groups:
-                g_id = g.get("id")
-                g_title = g.get("title") or g.get("name") or "Untitled Group"
-                if g_id:
-                    group_metadata[g_id] = g_title
-
-            if not group_metadata:
-                continue
-
-            for tab in window.get("tabs", []):
-                group_id = tab.get("groupId")
-                if group_id:
-                    group_id = str(group_id)
-
-                if not group_id or group_id not in group_metadata:
-                    continue
-
-                entries = tab.get("entries", [])
-                if not entries:
-                    continue
-
-                active_idx = tab.get("index", 1) - 1
-                if 0 <= active_idx < len(entries):
-                    url = entries[active_idx].get("url", "")
-
-                    if self._is_youtube_video(url):
-                        vid_id = self._extract_video_id(url)
-
-                        if vid_id and vid_id not in seen_video_ids:
-                            seen_video_ids.add(vid_id)
-                            group_name = group_metadata[group_id]
-                            if group_name not in organized_groups:
-                                organized_groups[group_name] = []
-                            organized_groups[group_name].append(url)
-
-        return organized_groups
-
-
-class ChromeBrowser(BrowserBackend):
-    @property
-    def name(self) -> str:
-        return "Google Chrome"
-
-    def get_profiles(self) -> List[Path]:
-        system = platform.system()
-        base_path = None
-        if system == "Windows":
-            base_path = (
-                Path(os.getenv("LOCALAPPDATA")) / "Google" / "Chrome" / "User Data"
-            )
-        elif system == "Darwin":
-            base_path = (
-                Path.home() / "Library" / "Application Support" / "Google" / "Chrome"
-            )
-        elif system == "Linux":
-            base_path = Path.home() / ".config" / "google-chrome"
-
-        if not base_path or not base_path.exists():
-            return []
-
-        profiles = []
-        if (base_path / "Default").exists():
-            profiles.append(base_path / "Default")
-        profiles.extend(list(base_path.glob("Profile *")))
-
-        def get_pref_mtime(p):
-            pref = p / "Preferences"
-            return pref.stat().st_mtime if pref.exists() else 0
-
-        # Sort by recently used
-        return sorted(profiles, key=get_pref_mtime, reverse=True)
-
-    def _get_active_session_urls(self, profile_path: Path) -> List[str]:
-        """
-        Scrapes the binary 'Current Session' (SNSS format) using Regex.
-        Filters navigation history and duplicates.
-        """
-        sessions_dir = profile_path / "Sessions"
-        if not sessions_dir.exists():
-            return []
-
-        target_file = sessions_dir / "Current Session"
-
-        # If the Current Session file is locked or empty, try to find the last Session_*
-        if not target_file.exists() or target_file.stat().st_size == 0:
-            session_files = list(sessions_dir.glob("Session_*"))
-            if session_files:
-                target_file = max(session_files, key=os.path.getmtime)
-            else:
-                return []
-
-        final_urls = []
-        seen_video_ids = set()
-
-        url_pattern = re.compile(rb'(https?://[^\x00-\x20\x7f"<>|\^`{\}]+)')
-
-        try:
-            with open(target_file, "rb") as f:
-                content = f.read()
-                matches = url_pattern.findall(content)
-
-                # Read the file from the end, since the current tabs are usually at the end of the file
-                for match in reversed(matches):
-                    try:
-                        dec_url = match.decode("utf-8")
-
-                        if self._is_youtube_video(dec_url):
-                            vid_id = self._extract_video_id(dec_url)
-                            if vid_id and vid_id not in seen_video_ids:
-                                seen_video_ids.add(vid_id)
-                                final_urls.append(dec_url)
-
-                    except UnicodeDecodeError:
-                        continue
-        except Exception as e:
-            log.warning(f"Could not read Chrome Session file: {e}")
-
-        return final_urls
-
-    def extract_groups(self, profile_path: Path) -> Dict[str, List[str]]:
-        organized_groups = {}
-
-        active_urls = self._get_active_session_urls(profile_path)
-        if active_urls:
-            organized_groups["[Active Session] Open Tabs"] = active_urls
-
-        bookmarks_path = profile_path / "Bookmarks"
-        data = self._safe_read_json(bookmarks_path)
-
-        if data:
-            try:
-                seen_bookmark_vids = set()
-
-                def recurse_nodes(node, current_folder_name=None):
-                    my_name = node.get("name", "")
-                    if "children" in node:
-                        next_group = (
-                            my_name
-                            if node.get("id") != "0"
-                            and my_name
-                            not in [
-                                "Bookmarks bar",
-                                "Other bookmarks",
-                                "Mobile bookmarks",
-                            ]
-                            else current_folder_name
-                        )
-                        for child in node["children"]:
-                            recurse_nodes(child, next_group)
-                    elif "url" in node:
-                        url = node["url"]
-                        if self._is_youtube_video(url):
-                            vid_id = self._extract_video_id(url)
-                            if vid_id and vid_id not in seen_bookmark_vids:
-                                seen_bookmark_vids.add(vid_id)
-                                if current_folder_name:
-                                    if current_folder_name not in organized_groups:
-                                        organized_groups[current_folder_name] = []
-                                    organized_groups[current_folder_name].append(url)
-
-                roots = data.get("roots", {})
-                for root_key in roots:
-                    recurse_nodes(roots[root_key])
-            except Exception as e:
-                log.warning(f"Failed to parse Chrome bookmarks for {profile_path}: {e}")
-
-        return organized_groups
-
-
-def ask_quality() -> Optional[QualityProfile]:
+def ask_quality() -> Optional[config.QualityProfile]:
     """CLI Menu for selecting audio quality."""
-    global ALLOW_SKIP_FRAGMENTS
     ffmpeg_available = is_ffmpeg_installed()
-    log.info(
+    app_logging.log.info(
         "Opening quality selection menu (FFmpeg available: %s)",
         ffmpeg_available,
     )
     while True:
         print("\n--- Audio Quality Settings ---")
-        for key, val in QUALITY_OPTIONS.items():
+        for key, val in config.QUALITY_OPTIONS.items():
             if not ffmpeg_available and val.convert:
                 print(f"[{key}] [UNAVAILABLE - Needs FFmpeg] {val.name}")
             else:
@@ -591,7 +112,7 @@ def ask_quality() -> Optional[QualityProfile]:
 
         skip_status = (
             "ENABLED (Audio may glitch)"
-            if ALLOW_SKIP_FRAGMENTS
+            if config.ALLOW_SKIP_FRAGMENTS[0]
             else "DISABLED (Stops on error)"
         )
         print(f"\n[S] Skip Missing Blocks: {skip_status}")
@@ -604,18 +125,21 @@ def ask_quality() -> Optional[QualityProfile]:
             return None
 
         if choice == "s":
-            ALLOW_SKIP_FRAGMENTS = not ALLOW_SKIP_FRAGMENTS
-            log.info(
-                "User toggled skip missing fragments to: %s", ALLOW_SKIP_FRAGMENTS
+            config.ALLOW_SKIP_FRAGMENTS[0] = not config.ALLOW_SKIP_FRAGMENTS[0]
+            app_logging.log.info(
+                "User toggled skip missing fragments to: %s",
+                config.ALLOW_SKIP_FRAGMENTS[0],
             )
             print("Setting updated.")
             continue
 
-        if choice in QUALITY_OPTIONS:
-            selected = QUALITY_OPTIONS[choice]
+        if choice in config.QUALITY_OPTIONS:
+            selected = config.QUALITY_OPTIONS[choice]
 
             if selected.convert and not ffmpeg_available:
-                log.error("FFmpeg is missing! Cannot convert to %s.", selected.codec)
+                app_logging.log.error(
+                    "FFmpeg is missing! Cannot convert to %s.", selected.codec
+                )
                 print("\n[ERROR] FFmpeg is missing!")
                 print("You cannot select MP3 conversion without FFmpeg installed.")
                 print("Please install FFmpeg or select Option 3 (Original Audio).")
@@ -713,24 +237,26 @@ def clean_tags(filepath: Path) -> None:
             new_title = sanitize_text(original_title)
             if new_title != original_title:
                 audio.add(TIT2(encoding=3, text=new_title))
-                log.info(f"[METADATA] Renamed Title: '{original_title}' -> '{new_title}'")
+                app_logging.log.info(
+                    f"[METADATA] Renamed Title: '{original_title}' -> '{new_title}'"
+                )
 
         # Save (Force ID3v2.3 for max Windows/Car compatibility)
         audio.save(v1=0, v2_version=3)
-        log.info(f"[CLEANER] Sanitized tags: {filepath.name}")
+        app_logging.log.info(f"[CLEANER] Sanitized tags: {filepath.name}")
 
     except Exception as e:
-        log.error(f"[CLEANER] Failed on {filepath.name}: {e}")
+        app_logging.log.error(f"[CLEANER] Failed on {filepath.name}: {e}")
 
 
 def download_audio(
-    urls: List[str], group_name: str, quality_settings: QualityProfile
+    urls: List[str], group_name: str, quality_settings: config.QualityProfile
 ) -> Dict[str, int]:
     """
     Orchestrates the download process using yt-dlp.
     Handles filename generation, conversions, and metadata post-processing.
     """
-    log.info(
+    app_logging.log.info(
         "Starting download for group '%s' with %d URL(s). Quality: %s (convert=%s, codec=%s)",
         group_name,
         len(urls),
@@ -742,13 +268,20 @@ def download_audio(
     safe_name = "".join(
         [c for c in group_name if c.isalpha() or c.isdigit() or c == " "]
     ).strip()
-    download_path = BASE_DIR / "downloads" / safe_name
+    download_path = config.BASE_DIR / "downloads" / safe_name
     download_path.mkdir(parents=True, exist_ok=True)
 
     files_before = set(download_path.glob("*"))
     frag_logger = FragmentLogger()
     has_ffmpeg = is_ffmpeg_installed()
     browser_strategies = [None, "firefox", "chrome"]
+
+    # Player client configurations to try as fallback when signature solving fails
+    player_client_configs = [
+        ["tv", "web"],  # Default for cookies
+        ["web"],        # Simpler fallback
+        ["ios"],        # Alternative client
+    ]
 
     success = False
     downloaded_files = []
@@ -762,162 +295,359 @@ def download_audio(
 
         browser_name = current_browser if current_browser else "Anonymous (No Cookies)"
         print(f"\n" + "=" * 50)
-        log.info(f"[ATTEMPT] Trying download via: {browser_name.upper()}")
+        app_logging.log.info(f"[ATTEMPT] Trying download via: {browser_name.upper()}")
         print("=" * 50)
 
-        ydl_opts = {
-            "outtmpl": str(download_path / "%(title)s.%(ext)s"),
-            "restrictfilenames": False,
-            "windowsfilenames": True,
-            "overwrites": True,
-            "force_overwrites": True,
-            "verbose": False,
-            "quiet": False,
-            "logger": frag_logger,
-            "progress_hooks": [show_progress],
-            "socket_timeout": 30,
-            "retries": 15,
-            "fragment_retries": 15,
-            "keepfragments": False,
-            "skip_unavailable_fragments": ALLOW_SKIP_FRAGMENTS,
-            "writethumbnail": False,
-            "noplaylist": True,
-            "extractor_args": {
-                "youtube": {"player_client": ["default", "-web_safari"]}
-            },
-            "parse_metadata": [
-                ":(?P<meta_synopsis>)",
-                ":(?P<meta_description>)",
-                ":(?P<meta_comment>)",
-                ":(?P<meta_purl>)",
-                ":(?P<meta_encoder>)",
-                ":(?P<meta_copyright>)",
-            ],
-            "postprocessors": [],
-            "postprocessor_args": {},
-        }
-
-        if current_browser:
-            ydl_opts["cookiesfrombrowser"] = (current_browser,)
-        else:
-            ydl_opts.pop("cookiesfrombrowser", None)
-
-        if has_ffmpeg:
-            ydl_opts["writethumbnail"] = True
-            ydl_opts["postprocessor_args"] = {
-                "FFmpegExtractAudio": ["-bitexact", "-map_metadata", "-1"],
-                "FFmpegMetadata": ["-id3v2_version", "3", "-write_id3v1", "0"],
-                "EmbedThumbnail": ["-map_metadata", "-1"],
-            }
-            ydl_opts["postprocessors"] = [
-                {"key": "SponsorBlock"},
-                {
-                    "key": "ModifyChapters",
-                    "remove_sponsor_segments": [
-                        "sponsor",
-                        "intro",
-                        "outro",
-                        "selfpromo",
-                        "interaction",
-                        "music_offtopic",
-                    ],
-                },
-                {"key": "EmbedThumbnail"},
-                {"key": "FFmpegMetadata", "add_metadata": True},
-            ]
-
-            if quality_settings.convert:
-                ydl_opts["format"] = "bestaudio/bestvideo+bestaudio/best"
-                ydl_opts["postprocessors"].insert(
-                    0,
-                    {
-                        "key": "FFmpegExtractAudio",
-                        "preferredcodec": quality_settings.codec,
-                        "preferredquality": "0",
-                    },
-                )
-            else:
-                ydl_opts["format"] = "bestaudio[ext=m4a]/bestaudio/best"
-        else:
-            log.info("FFmpeg not detected. Downloading raw audio only.")
-            ydl_opts["format"] = "bestaudio[ext=m4a]/bestaudio/best"
-
+        use_cookies = bool(current_browser)
+        # Try different player_client configurations if signature solving fails
+        player_client_idx = 0
         succeeded_in_this_pass = []
 
         try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                for url in remaining_urls:
-                    try:
-                        info = ydl.extract_info(url, download=True)
-                        filename = ydl.prepare_filename(info)
-                        final_path = Path(filename)
+            while player_client_idx < len(player_client_configs) if use_cookies else 1:
+                # Reset logger state for each attempt
+                frag_logger.signature_solving_failed = False
+                frag_logger.only_images_available = False
 
-                        if quality_settings.convert:
-                            final_path = final_path.with_suffix(
-                                f".{quality_settings.codec}"
+                if use_cookies:
+                    player_clients = player_client_configs[player_client_idx]
+                else:
+                    player_clients = ["default", "-web_safari"]
+
+                ydl_opts = {
+                    "outtmpl": str(download_path / "%(title)s.%(ext)s"),
+                    "restrictfilenames": False,
+                    "windowsfilenames": True,
+                    "overwrites": True,
+                    "force_overwrites": True,
+                    "verbose": False,
+                    "quiet": False,
+                    "logger": frag_logger,
+                    "progress_hooks": [show_progress],
+                    "socket_timeout": 30,
+                    "retries": 15,
+                    "fragment_retries": 15,
+                    "keepfragments": False,
+                    "skip_unavailable_fragments": config.ALLOW_SKIP_FRAGMENTS[0],
+                    "writethumbnail": False,
+                    "noplaylist": True,
+                    "extractor_args": {
+                        "youtube": {
+                            "player_client": player_clients
+                        }
+                    },
+                    "parse_metadata": [
+                        ":(?P<meta_synopsis>)",
+                        ":(?P<meta_description>)",
+                        ":(?P<meta_comment>)",
+                        ":(?P<meta_purl>)",
+                        ":(?P<meta_encoder>)",
+                        ":(?P<meta_copyright>)",
+                    ],
+                    "postprocessors": [],
+                    "postprocessor_args": {},
+                }
+
+                # Enable Deno for JavaScript signature solving (recommended by yt-dlp)
+                # Deno is enabled by default in yt-dlp, so we don't need to set it explicitly
+                # Only set js_runtimes if Deno is not in PATH but we found it at a custom location
+                deno_path = get_deno_path()
+                if deno_path and not is_deno_installed():
+                    # Deno found at custom location but not in PATH - specify path explicitly
+                    # Format: {runtime_name: {config_dict}}
+                    ydl_opts["js_runtimes"] = {"deno": {"path": deno_path}}
+                    app_logging.log.debug(f"Using Deno for signature solving (custom path): {deno_path}")
+                elif is_deno_installed():
+                    # Deno is in PATH - yt-dlp will auto-detect it (enabled by default)
+                    app_logging.log.debug("Using Deno for signature solving (auto-detected from PATH)")
+                else:
+                    # No Deno found - yt-dlp will try to use it if available, or fall back
+                    app_logging.log.debug("Deno not found - signature solving may fail")
+
+                if current_browser:
+                    ydl_opts["cookiesfrombrowser"] = (current_browser,)
+                else:
+                    ydl_opts.pop("cookiesfrombrowser", None)
+
+                if has_ffmpeg:
+                    ydl_opts["writethumbnail"] = True
+                    ydl_opts["postprocessor_args"] = {
+                        "FFmpegExtractAudio": ["-bitexact", "-map_metadata", "-1"],
+                        "FFmpegMetadata": ["-id3v2_version", "3", "-write_id3v1", "0"],
+                        "EmbedThumbnail": ["-map_metadata", "-1"],
+                    }
+                    ydl_opts["postprocessors"] = [
+                        {"key": "SponsorBlock"},
+                        {
+                            "key": "ModifyChapters",
+                            "remove_sponsor_segments": [
+                                "sponsor",
+                                "intro",
+                                "outro",
+                                "selfpromo",
+                                "interaction",
+                                "music_offtopic",
+                            ],
+                        },
+                        {"key": "EmbedThumbnail"},
+                        {"key": "FFmpegMetadata", "add_metadata": True},
+                    ]
+
+                    if quality_settings.convert:
+                        if use_cookies:
+                            ydl_opts["format"] = (
+                                "bestaudio/bestvideo+bestaudio/"
+                                "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best"
                             )
-
-                        succeeded_in_this_pass.append(url)
-                        downloaded_files.append(final_path)
-                        log.info(
-                            "[SUCCESS] Downloaded '%s' via %s",
-                            final_path.name,
-                            browser_name.upper(),
+                        else:
+                            ydl_opts["format"] = "bestaudio/bestvideo+bestaudio/best"
+                        ydl_opts["postprocessors"].insert(
+                            0,
+                            {
+                                "key": "FFmpegExtractAudio",
+                                "preferredcodec": quality_settings.codec,
+                                "preferredquality": "0",
+                            },
                         )
-
-                    except DownloadError as e:
-                        err_msg = str(e)
-
-                        if "403" in err_msg or "Forbidden" in err_msg:
-                            raise FatalForbiddenError("403 Forbidden (IP Block)")
-                        if "Requested format is not available" in err_msg:
-                            raise FatalForbiddenError(
-                                "Format Unavailable (Cookie Soft Ban)"
+                    else:
+                        if use_cookies:
+                            ydl_opts["format"] = (
+                                "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best"
                             )
-                        if (
-                            "Failed to decrypt" in err_msg
-                            or "database is locked" in err_msg
-                        ):
-                            raise FatalForbiddenError(
-                                "Cookie Access Failed (Browser Open/Encrypted)"
-                            )
+                        else:
+                            ydl_opts["format"] = "bestaudio[ext=m4a]/bestaudio/best"
+                else:
+                    app_logging.log.info("FFmpeg not detected. Downloading raw audio only.")
+                    ydl_opts["format"] = (
+                        "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best"
+                        if use_cookies
+                        else "bestaudio[ext=m4a]/bestaudio/best"
+                    )
 
-                        log.error(f"Download failed for {url}: {e}")
+                try:
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        for url in remaining_urls:
+                            if url in succeeded_in_this_pass:
+                                continue
 
-                    except PermissionError as e:
-                        log.error(
-                            "Windows locked the file (Antivirus/FFmpeg race condition) for URL %s: %s",
-                            url,
-                            e,
+                            try:
+                                # First, try to get info without downloading to check formats
+                                try:
+                                    info = ydl.extract_info(url, download=False)
+                                    formats = info.get('formats', [])
+
+                                    # Check if we have actual audio/video formats (not just storyboards)
+                                    has_real_formats = False
+                                    for fmt in formats:
+                                        acodec = fmt.get('acodec', 'none')
+                                        vcodec = fmt.get('vcodec', 'none')
+                                        fmt_id = fmt.get('format_id', '')
+                                        # Skip storyboard formats
+                                        if fmt_id.startswith('sb'):
+                                            continue
+                                        if acodec != 'none' or vcodec != 'none':
+                                            has_real_formats = True
+                                            break
+
+                                    if not has_real_formats and formats:
+                                        # Only storyboard images available
+                                        if frag_logger.signature_solving_failed or frag_logger.only_images_available:
+                                            # Try next player_client config if available
+                                            if use_cookies and player_client_idx < len(player_client_configs) - 1:
+                                                app_logging.log.info(
+                                                    "No formats available with player_client %s, trying next configuration...",
+                                                    player_clients
+                                                )
+                                                raise FatalForbiddenError(
+                                                    "No Formats Available (Signature Solving Failed - Try Next Config)"
+                                                )
+                                            else:
+                                                raise FatalForbiddenError(
+                                                    "No Formats Available (Signature Solving Failed)"
+                                                )
+                                        else:
+                                            raise FatalForbiddenError(
+                                                "No Formats Available (Video Restricted)"
+                                            )
+
+                                except FatalForbiddenError:
+                                    raise  # Re-raise format availability errors
+                                except Exception as e:
+                                    # If info extraction fails, try downloading anyway
+                                    app_logging.log.debug(f"Info extraction failed, trying download: {e}")
+
+                                # Now try actual download
+                                info = ydl.extract_info(url, download=True)
+                                filename = ydl.prepare_filename(info)
+                                final_path = Path(filename)
+
+                                if quality_settings.convert:
+                                    final_path = final_path.with_suffix(
+                                        f".{quality_settings.codec}"
+                                    )
+
+                                succeeded_in_this_pass.append(url)
+                                downloaded_files.append(final_path)
+                                app_logging.log.info(
+                                    "[SUCCESS] Downloaded '%s' via %s (player_client: %s)",
+                                    final_path.name,
+                                    browser_name.upper(),
+                                    player_clients,
+                                )
+
+                            except DownloadError as e:
+                                err_msg = str(e)
+
+                                if "403" in err_msg or "Forbidden" in err_msg:
+                                    raise FatalForbiddenError("403 Forbidden (IP Block)")
+
+                                if "Requested format is not available" in err_msg:
+                                    # Check if this is due to signature solving failure
+                                    if frag_logger.signature_solving_failed or frag_logger.only_images_available:
+                                        # Try next player_client config if available
+                                        if use_cookies and player_client_idx < len(player_client_configs) - 1:
+                                            app_logging.log.info(
+                                                "Format unavailable with player_client %s, trying next configuration...",
+                                                player_clients
+                                            )
+                                            # Raise exception to be caught by outer handler to try next config
+                                            raise FatalForbiddenError(
+                                                "Format Unavailable (Signature Solving Failed - Try Next Config)"
+                                            )
+                                        else:
+                                            raise FatalForbiddenError(
+                                                "Format Unavailable (Signature Solving Failed)"
+                                            )
+                                    else:
+                                        raise FatalForbiddenError(
+                                            "Format Unavailable (Cookie Soft Ban)"
+                                        )
+
+                                if (
+                                    "Failed to decrypt" in err_msg
+                                    or "database is locked" in err_msg
+                                ):
+                                    raise FatalForbiddenError(
+                                        "Cookie Access Failed (Browser Open/Encrypted)"
+                                    )
+
+                                app_logging.log.error(f"Download failed for {url}: {e}")
+
+                            except PermissionError as e:
+                                app_logging.log.error(
+                                    "Windows locked the file (Antivirus/FFmpeg race condition) for URL %s: %s",
+                                    url,
+                                    e,
+                                )
+                                print(f"\n[ERROR] File locked by Windows. Skipping: {url}")
+
+                            except FatalForbiddenError:
+                                raise  # Let outer handler switch browser strategy
+
+                            except Exception as e:
+                                app_logging.log.error(
+                                    f"Failed to process {url}: {e}", exc_info=True
+                                )
+                                print(f"\n[ERROR] Skipped due to error: {e}")
+
+                    # If we got here, check if we actually downloaded anything
+                    # Only set success if we downloaded at least one file
+                    if succeeded_in_this_pass:
+                        success = True
+                        break  # Exit player_client loop
+                    # If no files downloaded, continue to next player_client config if available
+                    elif use_cookies and player_client_idx < len(player_client_configs) - 1:
+                        app_logging.log.info(
+                            "No files downloaded with player_client %s, trying next configuration...",
+                            player_clients
                         )
-                        print(f"\n[ERROR] File locked by Windows. Skipping: {url}")
+                        player_client_idx += 1
+                        continue
+                    else:
+                        # No more configs to try, exit loop
+                        break
 
-                    except Exception as e:
-                        log.error(f"Failed to process {url}: {e}", exc_info=True)
-                        print(f"\n[ERROR] Skipped due to error: {e}")
+                except FatalForbiddenError as e:
+                    err_str = str(e)
 
-            success = True
+                    # If signature solving failed and we have more player_client configs to try
+                    if ("Signature Solving Failed" in err_str or "No Formats Available" in err_str) and \
+                       use_cookies and player_client_idx < len(player_client_configs) - 1:
+                        # Check if this is specifically asking to try next config
+                        if "Try Next Config" in err_str:
+                            player_client_idx += 1
+                            continue  # Try next player_client config
+                        else:
+                            app_logging.log.info(
+                                "Signature solving failed with player_client %s, trying next configuration...",
+                                player_clients
+                            )
+                            player_client_idx += 1
+                            continue  # Try next player_client config
+                    else:
+                        # No more configs to try, raise error to switch browser strategy
+                        raise
+                except Exception as e:
+                    app_logging.log.error(
+                        f"Unexpected error during download loop: {e}", exc_info=True
+                    )
+                    # If we have more player_client configs, try them
+                    if use_cookies and player_client_idx < len(player_client_configs) - 1:
+                        player_client_idx += 1
+                        continue
+                    else:
+                        break
+
+                # Handle FatalForbiddenError after player_client loop
+                if success:
+                    break  # Successfully downloaded, exit browser strategy loop
 
         except FatalForbiddenError as e:
-            log.warning(f"\n[WARN] Strategy '{browser_name}' failed: {e}")
-            log.info("[INFO] Switching to next browser strategy...")
+            err_str = str(e)
+            app_logging.log.warning(
+                "\n[WARN] Strategy '%s' failed: %s", browser_name, err_str
+            )
+            app_logging.log.info("[INFO] Switching to next browser strategy...")
             print(f"\n[WARN] Strategy '{browser_name}' failed: {e}")
             print("[INFO] Switching to next browser strategy...")
+            if current_browser == "chrome" and "Cookie Access Failed" in err_str:
+                hint = (
+                    "Tip: Close Chrome completely, then try again. "
+                    "Or use Firefox instead. "
+                    "See https://github.com/yt-dlp/yt-dlp/issues/10927"
+                )
+                print(hint)
+                app_logging.log.info("[HINT] %s", hint)
+            elif "Signature Solving Failed" in err_str or "No Formats Available" in err_str:
+                hint = (
+                    "Tip: YouTube signature solving failed. "
+                    "Install Node.js for better compatibility, or update yt-dlp: pip install -U yt-dlp"
+                )
+                print(hint)
+                app_logging.log.info("[HINT] %s", hint)
+            elif "Format Unavailable" in err_str:
+                hint = "Tip: Update yt-dlp: pip install -U yt-dlp"
+                print(hint)
+                app_logging.log.info("[HINT] %s", hint)
         except Exception as e:
-            log.error(f"Unexpected error during download loop: {e}", exc_info=True)
+            app_logging.log.error(
+                f"Unexpected error during download loop: {e}", exc_info=True
+            )
             break
 
-        for url in succeeded_in_this_pass:
-            if url in remaining_urls:
-                remaining_urls.remove(url)
+    for url in succeeded_in_this_pass:
+        if url in remaining_urls:
+            remaining_urls.remove(url)
 
     if not success:
-        log.warning("All browser strategies failed to download the content.")
-        log.info("Please check your internet or try updating yt-dlp.")
+        app_logging.log.warning(
+            "All browser strategies failed to download the content."
+        )
+        app_logging.log.info("Please check your internet or try updating yt-dlp.")
 
     if has_ffmpeg and downloaded_files:
         print("\n" + "=" * 50)
-        log.info("[POST-PROCESSING] Cleaning tags and renaming files...")
+        app_logging.log.info("[POST-PROCESSING] Cleaning tags and renaming files...")
         print("=" * 50)
 
         total = len(downloaded_files)
@@ -926,7 +656,9 @@ def download_audio(
             if not file_path.exists():
                 continue
 
-            log.info(f"[PROCESSING] Item {i + 1}/{total}: {file_path.name}...    ")
+            app_logging.log.info(
+                f"[PROCESSING] Item {i + 1}/{total}: {file_path.name}...    "
+            )
             sys.stdout.flush()
 
             original_stem = file_path.stem
@@ -946,7 +678,7 @@ def download_audio(
                     file_path = new_path
 
                 except OSError as e:
-                    log.error(f"Could not rename {file_path.name}: {e}")
+                    app_logging.log.error(f"Could not rename {file_path.name}: {e}")
                     print(f"[RENAME ERROR] Could not rename {file_path.name}: {e}")
 
             clean_tags(file_path)
@@ -962,10 +694,27 @@ def download_audio(
 
 
 def main() -> None:
-    log.info("Music Downloader started. Base directory: %s", BASE_DIR)
+    app_logging.log.info(
+        "Music Downloader started. Base directory: %s", config.BASE_DIR
+    )
+
+    # Check for Deno installation
+    if is_deno_installed():
+        deno_path = get_deno_path()
+        app_logging.log.info(
+            "Deno JavaScript runtime detected: %s", deno_path or "PATH"
+        )
+    else:
+        app_logging.log.warning(
+            "Deno JavaScript runtime not found. YouTube signature solving may fail. "
+            "Install Deno: Run windows\\install_deno.bat or visit https://deno.land"
+        )
+
     try:
         browsers = [FirefoxBrowser(), ChromeBrowser()]
-        log.info("Detected browser backends: %s", ", ".join(b.name for b in browsers))
+        app_logging.log.info(
+            "Detected browser backends: %s", ", ".join(b.name for b in browsers)
+        )
 
         while True:
             clear_screen()
@@ -991,14 +740,16 @@ def main() -> None:
             except (ValueError, IndexError):
                 continue
 
-            log.info("User selected browser backend: %s", backend.name)
+            app_logging.log.info("User selected browser backend: %s", backend.name)
             profiles = backend.get_profiles()
 
             if not profiles:
-                    log.warning("No profiles found for backend: %s", backend.name)
-                    print(f"\nNo profiles found for {backend.name}.")
-                    input("Press Enter to back...")
-                    continue
+                app_logging.log.warning(
+                    "No profiles found for backend: %s", backend.name
+                )
+                print(f"\nNo profiles found for {backend.name}.")
+                input("Press Enter to back...")
+                continue
 
             current_profile_idx = 0
             back_to_browser_menu = False
@@ -1017,7 +768,7 @@ def main() -> None:
                     print("-" * 40)
                     print("Reading data...")
 
-                    log.info(
+                    app_logging.log.info(
                         "Reading data for profile '%s' at path '%s'",
                         selected_profile.name,
                         selected_profile,
@@ -1033,7 +784,7 @@ def main() -> None:
                             valid_groups[name] = yt_links
 
                     if not valid_groups:
-                        log.info(
+                        app_logging.log.info(
                             "No valid YouTube groups found for profile '%s' (%s)",
                             selected_profile.name,
                             backend.name,
@@ -1076,7 +827,7 @@ def main() -> None:
                         continue
 
                     group_names = list(valid_groups.keys())
-                    log.info(
+                    app_logging.log.info(
                         "Found %d group(s)/folder(s) for profile '%s'.",
                         len(group_names),
                         selected_profile.name,
@@ -1106,7 +857,7 @@ def main() -> None:
 
                     try:
                         target_group = group_names[int(choice_input) - 1]
-                        log.info(
+                        app_logging.log.info(
                             "User selected group '%s' containing %d link(s).",
                             target_group,
                             len(valid_groups[target_group]),
@@ -1118,13 +869,15 @@ def main() -> None:
                     if quality is None:
                         continue
 
-                    log.info(f"User selected Quality: {quality.name} (Convert: {quality.convert})")
+                    app_logging.log.info(
+                        f"User selected Quality: {quality.name} (Convert: {quality.convert})"
+                    )
 
                     stats = download_audio(
                         valid_groups[target_group], target_group, quality
                     )
 
-                    log.info(
+                    app_logging.log.info(
                         "Download finished for group '%s'. New files: %d, skipped fragments: %d, warnings: %d",
                         target_group,
                         stats.get("new_files", 0),
@@ -1137,13 +890,14 @@ def main() -> None:
                     input("Press Enter to continue...")
 
     except KeyboardInterrupt:
-        log.info("Execution interrupted by user via KeyboardInterrupt.")
+        app_logging.log.info("Execution interrupted by user via KeyboardInterrupt.")
         sys.exit(0)
 
 
 if __name__ == "__main__":
+    init_logging(config.BASE_DIR)
     try:
         main()
     except Exception as e:
-        log.exception("Unhandled exception in Music Downloader: %s", e)
+        app_logging.log.exception("Unhandled exception in Music Downloader: %s", e)
         sys.exit(1)
