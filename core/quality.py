@@ -6,6 +6,14 @@ import config
 from config import QualityProfile, RuntimeSettings
 
 from .download import is_ffmpeg_installed
+from .ui import (
+    MSG_FFMPEG_MISSING,
+    MSG_INVALID_CHOICE,
+    MSG_SETTING_UPDATED,
+    clear_screen,
+    prompt,
+    wait_enter,
+)
 
 
 def ask_quality(settings: RuntimeSettings) -> Optional[QualityProfile]:
@@ -16,21 +24,23 @@ def ask_quality(settings: RuntimeSettings) -> Optional[QualityProfile]:
         ffmpeg_available,
     )
     while True:
-        print("\n--- Audio Quality Settings ---")
+        clear_screen()
+        print("\n  --- Audio quality ---\n")
         for key, val in config.QUALITY_OPTIONS.items():
             if not ffmpeg_available and val.convert:
-                print(f"[{key}] [UNAVAILABLE - Needs FFmpeg] {val.name}")
+                print("    [{}] {}  (requires FFmpeg)".format(key, val.name))
             else:
-                print(f"[{key}] {val.name} - {val.desc}")
+                print("    [{}] {}  —  {}".format(key, val.name, val.desc))
 
         skip_status = (
-            "ENABLED (Audio may glitch)"
+            "on (may skip bad fragments)"
             if settings.allow_skip_fragments
-            else "DISABLED (Stops on error)"
+            else "off (stop on error)"
         )
-        print(f"\n[S] Skip Missing Blocks: {skip_status}")
+        print("\n    [S] Skip missing blocks:  {}".format(skip_status))
+        print("    [b] Back   [q] Quit")
 
-        choice = input("\nSelect Quality (or 'q' to quit, 'b' back): ").strip().lower()
+        choice = prompt("Select quality", "1–3, S, b, q")
 
         if choice == "q":
             sys.exit()
@@ -43,7 +53,7 @@ def ask_quality(settings: RuntimeSettings) -> Optional[QualityProfile]:
                 "User toggled skip missing fragments to: %s",
                 settings.allow_skip_fragments,
             )
-            print("Setting updated.")
+            print("\n  " + MSG_SETTING_UPDATED)
             continue
 
         if choice in config.QUALITY_OPTIONS:
@@ -52,11 +62,9 @@ def ask_quality(settings: RuntimeSettings) -> Optional[QualityProfile]:
                 app_logging.log.error(
                     "FFmpeg is missing! Cannot convert to %s.", selected.codec
                 )
-                print("\n[ERROR] FFmpeg is missing!")
-                print("You cannot select MP3 conversion without FFmpeg installed.")
-                print("Please install FFmpeg or select Option 3 (Original Audio).")
-                input("Press Enter to continue...")
+                print("\n  " + MSG_FFMPEG_MISSING)
+                wait_enter()
                 continue
             return selected
 
-        print("Invalid selection.")
+        print("\n  " + MSG_INVALID_CHOICE)

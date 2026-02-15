@@ -7,13 +7,23 @@ import config
 from app_logging import init as init_logging
 from browsers import ChromeBrowser, FirefoxBrowser
 from config import get_config, RuntimeSettings
-from core import download_audio, get_deno_path, is_deno_installed, ask_quality
-
-
-def clear_screen() -> None:
-    """Clears terminal screen cross-platform."""
-    import os
-    os.system("cls" if os.name == "nt" else "clear")
+from core import (
+    download_audio,
+    get_deno_path,
+    is_deno_installed,
+    ask_quality,
+    clear_screen,
+    SEP_LINE,
+    SEP_THIN,
+    wait_enter,
+    prompt,
+    MSG_NO_GROUPS,
+    MSG_SELECT_GROUP,
+    MSG_INVALID_CHOICE,
+    MSG_JOB_DONE,
+    MSG_NO_PROFILES,
+    MSG_FILES_SAVED,
+)
 
 
 def main() -> None:
@@ -43,16 +53,15 @@ def main() -> None:
 
         while True:
             clear_screen()
-            print("==========================================")
+            print(SEP_LINE)
             print("     UNIVERSAL TAB GROUP DOWNLOADER       ")
-            print("==========================================")
-
-            print("\nSelect Browser:")
+            print(SEP_LINE)
+            print("\n  Select browser (sources for tabs/bookmarks):\n")
             for i, b in enumerate(browsers):
-                print(f"[{i + 1}] {b.name}")
-            print("[q] Quit")
+                print(f"    [{i + 1}] {b.name}")
+            print("    [q] Quit")
 
-            choice = input("\nChoice: ").strip().lower()
+            choice = prompt("Choice", "1–{}, q".format(len(browsers)))
             if choice == "q":
                 sys.exit()
 
@@ -63,6 +72,8 @@ def main() -> None:
                 else:
                     continue
             except (ValueError, IndexError):
+                print("\n  " + MSG_INVALID_CHOICE)
+                wait_enter()
                 continue
 
             app_logging.log.info("User selected browser backend: %s", backend.name)
@@ -72,8 +83,8 @@ def main() -> None:
                 app_logging.log.warning(
                     "No profiles found for backend: %s", backend.name
                 )
-                print(f"\nNo profiles found for {backend.name}.")
-                input("Press Enter to back...")
+                print("\n  " + MSG_NO_PROFILES)
+                wait_enter()
                 continue
 
             current_profile_idx = 0
@@ -87,11 +98,10 @@ def main() -> None:
 
                 while True:
                     clear_screen()
-                    print(f"Browser: {backend.name}")
-                    print(f"Profile: {selected_profile.name}")
-                    print(f"Path:    {selected_profile}")
-                    print("-" * 40)
-                    print("Reading data...")
+                    print(SEP_LINE)
+                    print("  {}  —  {}".format(backend.name, selected_profile.name))
+                    print(SEP_THIN)
+                    print("  Reading tabs and bookmarks...")
 
                     app_logging.log.info(
                         "Reading data for profile '%s' at path '%s'",
@@ -114,28 +124,18 @@ def main() -> None:
                             selected_profile.name,
                             backend.name,
                         )
-                        print("\nNo YouTube links found in this profile's Bookmarks.")
+                        print("\n  " + MSG_NO_GROUPS)
 
                         if backend.name == "Google Chrome":
-                            print("\n[!] TIPS FOR CHROME:")
-                            print(" 1. To detect links while Chrome is running:")
-                            print("    - Right-click tabs and 'Add tabs to new group'.")
-                            print(
-                                "    - Press (Ctrl+Shift+D) to bookmark all tabs into a folder."
-                            )
-                            print(
-                                " 2. Note: The script will prioritize Group Tab names."
-                            )
-                            print(" 3. Current profile: " + selected_profile.name)
-                            print("    Press [p] to switch profiles if needed.")
+                            print("\n  Tips for Chrome:")
+                            print("    • Right-click tabs → \"Add tabs to new group\".")
+                            print("    • Ctrl+Shift+D bookmarks all open tabs into a folder.")
+                            print("    • Current profile: " + selected_profile.name)
 
-                        print("-" * 40)
-                        print("[r] Refresh Data")
-                        print("[p] Switch Profile (Found " + str(len(profiles)) + ")")
-                        print("[b] Back to Browser Selection")
-                        print("[q] Quit")
+                        print(SEP_THIN)
+                        print("  [r] Refresh   [p] Switch profile ({})   [b] Back   [q] Quit".format(len(profiles)))
 
-                        choice_input = input("Choice: ").strip().lower()
+                        choice_input = prompt("Choice", "r, p, b, q")
                         if choice_input == "q":
                             sys.exit()
                         if choice_input == "b":
@@ -157,18 +157,18 @@ def main() -> None:
                         len(group_names),
                         selected_profile.name,
                     )
-                    print(f"\nFound Groups/Folders:")
+                    print("\n  Found {} group(s):\n".format(len(group_names)))
                     for i, name in enumerate(group_names):
-                        print(f"[{i + 1}] {name} ({len(valid_groups[name])} videos)")
+                        print("    [{}] {}  ({} video{})".format(
+                            i + 1, name, len(valid_groups[name]),
+                            "s" if len(valid_groups[name]) != 1 else ""
+                        ))
 
-                    print("\n------------------------------------------")
-                    print("[#] Select Group")
-                    print("[r] Refresh Data")
-                    print("[p] Switch Profile")
-                    print("[b] Back")
-                    print("[q] Quit")
+                    print(SEP_THIN)
+                    print("  " + MSG_SELECT_GROUP)
+                    print("  [r] Refresh   [p] Switch profile   [b] Back   [q] Quit")
 
-                    choice_input = input("\nChoice: ").strip().lower()
+                    choice_input = prompt("Choice", "1–{}, r, p, b, q".format(len(group_names)))
                     if choice_input == "q":
                         sys.exit()
                     if choice_input == "b":
@@ -188,6 +188,8 @@ def main() -> None:
                             len(valid_groups[target_group]),
                         )
                     except (ValueError, IndexError):
+                        print("\n  " + MSG_INVALID_CHOICE)
+                        wait_enter()
                         continue
 
                     quality = ask_quality(settings)
@@ -216,9 +218,20 @@ def main() -> None:
                         stats.get("warnings", 0),
                     )
 
-                    print(f"Downloaded {stats['new_files']} files")
-                    print("\nJob Complete.")
-                    input("Press Enter to continue...")
+                    new_files = stats.get("new_files", 0)
+                    warnings = stats.get("warnings", 0)
+                    skipped = stats.get("skipped_fragments", 0)
+                    safe_name = "".join(
+                        c for c in target_group if c.isalpha() or c.isdigit() or c == " "
+                    ).strip()
+                    save_path = app_cfg.download_dir / (safe_name or "downloads")
+
+                    print("\n  " + MSG_FILES_SAVED.format(path=save_path))
+                    print("  Downloaded {} file(s).".format(new_files))
+                    if warnings or skipped:
+                        print("  ({} warning(s), {} skipped fragment(s))".format(warnings, skipped))
+                    print("\n  " + MSG_JOB_DONE)
+                    wait_enter()
 
     except KeyboardInterrupt:
         app_logging.log.info("Execution interrupted by user via KeyboardInterrupt.")

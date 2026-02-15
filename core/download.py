@@ -11,6 +11,7 @@ from app_logging import FatalForbiddenError, FragmentLogger
 from config import QualityProfile, RuntimeSettings
 
 from .metadata import clean_tags, sanitize_text
+from .ui import MSG_ALL_FAILED, MSG_STRATEGY_FAILED, SEP_LINE
 
 
 def is_ffmpeg_installed() -> bool:
@@ -116,9 +117,10 @@ def download_audio(
             break
 
         browser_name = current_browser if current_browser else "Anonymous (No Cookies)"
-        print("\n" + "=" * 50)
+        print("\n" + SEP_LINE)
+        print("  Download attempt: {}".format(browser_name))
+        print(SEP_LINE)
         app_logging.log.info("[ATTEMPT] Trying download via: %s", browser_name.upper())
-        print("=" * 50)
 
         use_cookies = bool(current_browser)
         player_client_idx = 0
@@ -328,14 +330,14 @@ def download_audio(
                                     url,
                                     e,
                                 )
-                                print(f"\n[ERROR] File locked by Windows. Skipping: {url}")
+                                print("\n  File locked (e.g. by antivirus). Skipping this URL.")
                             except FatalForbiddenError:
                                 raise
                             except Exception as e:
                                 app_logging.log.error(
                                     "Failed to process %s: %s", url, e, exc_info=True
                                 )
-                                print(f"\n[ERROR] Skipped due to error: {e}")
+                                print("\n  Skipped due to error: {}".format(e))
 
                     if succeeded_in_this_pass:
                         success = True
@@ -379,8 +381,8 @@ def download_audio(
                 "\n[WARN] Strategy '%s' failed: %s", browser_name, err_str
             )
             app_logging.log.info("[INFO] Switching to next browser strategy...")
-            print(f"\n[WARN] Strategy '{browser_name}' failed: {e}")
-            print("[INFO] Switching to next browser strategy...")
+            print("\n  " + MSG_STRATEGY_FAILED)
+            print("  ({})".format(e))
             if current_browser == "chrome" and "Cookie Access Failed" in err_str:
                 hint = (
                     "Tip: Close Chrome completely, then try again. "
@@ -415,11 +417,13 @@ def download_audio(
             "All browser strategies failed to download the content."
         )
         app_logging.log.info("Please check your internet or try updating yt-dlp.")
+        print("\n  " + MSG_ALL_FAILED)
 
     if has_ffmpeg and downloaded_files:
-        print("\n" + "=" * 50)
+        print("\n" + SEP_LINE)
+        print("  Post-processing: tags and filenames")
+        print(SEP_LINE)
         app_logging.log.info("[POST-PROCESSING] Cleaning tags and renaming files...")
-        print("=" * 50)
         total = len(downloaded_files)
         for i, file_path in enumerate(downloaded_files):
             if not file_path.exists():
@@ -443,7 +447,7 @@ def download_audio(
                     file_path = new_path
                 except OSError as e:
                     app_logging.log.error("Could not rename %s: %s", file_path.name, e)
-                    print(f"[RENAME ERROR] Could not rename {file_path.name}: {e}")
+                    print("\n  Rename error: {} — {}".format(file_path.name, e))
             clean_tags(file_path)
 
     files_after = set(download_path.glob("*"))
