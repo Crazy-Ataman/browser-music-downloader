@@ -34,6 +34,7 @@ ffplay.exe
 ffprobe.exe
 
 # Other files
+config.json
 *.txt
 *.md
 !requirements.txt

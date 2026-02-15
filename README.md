@@ -89,6 +89,15 @@ This repository includes helper scripts to automate dependency installation and 
 
 ## Usage Guide
 
+### Configuration file (optional)
+
+You can create a `config.json` in the same folder as `music_download.py` to override defaults. Copy `config.json.example` to `config.json` and edit as needed:
+
+*   **`download_dir`** – Where to save downloads (path relative to the app folder or absolute). Default: `downloads`.
+*   **`default_quality`** – Preset quality key (`"1"`, `"2"`, `"3"`) or `null`. Not used by the menu yet; reserved for future default selection.
+*   **`log_level`** – Console log level: `DEBUG`, `INFO`, `WARNING`, or `ERROR`. Default: `INFO`.
+*   **`allow_skip_fragments`** – Initial value for “Skip Missing Blocks” (can still be toggled in the quality menu). Default: `false`.
+
 ### Logging & Diagnostics
 
 *   **Log location:** All diagnostic output is written to the `logs/log.txt` file next to `music_download.py`. The `logs` folder is created automatically and is ignored by git.
@@ -117,8 +126,9 @@ Chrome handles session files differently. To ensure your tabs are detected immed
 The codebase is split into modules for clarity and maintainability:
 *   **`app_logging`** – Logging setup, rotation, and the custom `FragmentLogger` used by yt-dlp.
 *   **`browsers`** – Browser backends (Firefox, Chrome) for profile detection and tab/session extraction.
-*   **`config`** – Constants: quality profiles, log rotation settings, and title-cleanup patterns.
-*   **`music_download.py`** – Main entry point: CLI, download orchestration, and metadata post-processing.
+*   **`config`** – Constants, optional config file loading (`config.json`), and quality profiles.
+*   **`core`** – Download logic (`download.py`), metadata cleaning (`metadata.py`), and quality menu (`quality.py`).
+*   **`music_download.py`** – Main entry point: CLI and orchestration only.
 
 ## How it works
 

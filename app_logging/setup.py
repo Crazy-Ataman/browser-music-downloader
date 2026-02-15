@@ -1,6 +1,7 @@
 import logging
 from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
 from pathlib import Path
+from typing import Optional
 
 from config.constants import (
     LOG_FILE_BACKUP_COUNT,
@@ -11,8 +12,10 @@ from config.constants import (
     LOG_TIME_WHEN,
 )
 
+_LEVEL_NAMES = {"DEBUG": logging.DEBUG, "INFO": logging.INFO, "WARNING": logging.WARNING, "ERROR": logging.ERROR}
 
-def setup_logging(base_dir: Path) -> logging.Logger:
+
+def setup_logging(base_dir: Path, console_level: Optional[str] = None) -> logging.Logger:
     logger = logging.getLogger("MusicDownloader")
 
     if logger.hasHandlers():
@@ -48,7 +51,8 @@ def setup_logging(base_dir: Path) -> logging.Logger:
     file_handler.setFormatter(file_format)
 
     console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.INFO)
+    level = _LEVEL_NAMES.get((console_level or "INFO").upper(), logging.INFO)
+    console_handler.setLevel(level)
     console_format = logging.Formatter("%(message)s")
     console_handler.setFormatter(console_format)
 

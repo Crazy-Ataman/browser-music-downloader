@@ -1,5 +1,3 @@
-"""Application constants."""
-
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -7,9 +5,6 @@ from typing import Optional
 
 # Paths
 BASE_DIR = Path(__file__).resolve().parent.parent
-
-# Download / quality (mutable list so runtime toggle in ask_quality() updates everywhere)
-ALLOW_SKIP_FRAGMENTS = [False]
 
 
 @dataclass

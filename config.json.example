@@ -1,0 +1,6 @@
+{
+  "download_dir": "downloads",
+  "default_quality": null,
+  "log_level": "INFO",
+  "allow_skip_fragments": false
+}

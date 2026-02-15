@@ -9,7 +9,8 @@ log: Any = None
 def init(base_dir: Path) -> Any:
     """Initialize logging. Must be called before using log or FragmentLogger."""
     global log
-    log = setup_logging(Path(base_dir))
+    from config import get_config
+    log = setup_logging(Path(base_dir), console_level=get_config().log_level)
     return log
 
 
