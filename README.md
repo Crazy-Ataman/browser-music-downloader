@@ -51,7 +51,7 @@ This repository includes helper scripts to automate dependency installation and 
 2.  Run **`install.bat`** once to install requirements (Python deps, FFmpeg check, and optional Deno check).
 3.  *(Optional)* If Deno is not installed, run **`install_deno.bat`** for better YouTube compatibility, then restart your terminal.
 4.  Run **`run.bat`** to start the downloader.
-    *   *Note: `run.bat` automatically updates the core download engine (`yt-dlp`) every time to prevent YouTube errors.*
+    *   *Note: `run.bat` automatically upgrades `yt-dlp`, `yt-dlp-ejs`, and other dependencies from `requirements.txt` on every launch to reduce YouTube breakage.*
 
 ### Linux / macOS
 1.  Navigate to the `linux` folder (or where the `.sh` files are located).
@@ -59,8 +59,8 @@ This repository includes helper scripts to automate dependency installation and 
     ```bash
     chmod +x setup.sh run.sh
     ```
-3.  Run **`./setup.sh`** once to install requirements.
-4.  Run **`./run.sh`** to start the downloader.
+3.  Run **`./setup.sh`** once to install requirements (latest versions).
+4.  Run **`./run.sh`** to start the downloader (`run.sh` upgrades dependencies on each launch).
 
 ## Manual Installation
 

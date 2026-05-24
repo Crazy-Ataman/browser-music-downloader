@@ -40,8 +40,9 @@ QUALITY_OPTIONS = {
     ),
 }
 
-# Title/filename cleanup patterns
+# Title/filename cleanup patterns (also used for ID3 tags in clean_tags)
 CLEANUP_PATTERNS = [
+    re.compile(r"\s*[({\[]\s*official\s*upload\s*[)}\]]", re.IGNORECASE),
     re.compile(r"\s*[({\[]\s*official\s*video\s*[)}\]]", re.IGNORECASE),
     re.compile(r"\s*[({\[]\s*official\s*music\s*video\s*[)}\]]", re.IGNORECASE),
     re.compile(r"\s*[({\[]\s*official\s*audio\s*[)}\]]", re.IGNORECASE),

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 echo "=================================================="
 echo "     Browser Music Downloader - Initial Setup"
@@ -14,8 +14,9 @@ fi
 echo "[OK] Python 3 is detected."
 
 echo ""
-echo "[INFO] Installing dependencies..."
-python3 -m pip install -r ../requirements.txt
+echo "[INFO] Installing dependencies (latest versions)..."
+python3 -m pip install --upgrade pip
+python3 -m pip install --upgrade -r requirements.txt
 
 if [ $? -ne 0 ]; then
     echo ""

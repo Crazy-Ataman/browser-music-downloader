@@ -5,8 +5,13 @@ CLS
 cd /d "%~dp0"
 cd ..
 
-echo Checking for core updates...
-python -m pip install --upgrade yt-dlp >nul 2>&1
+echo Checking for dependency updates...
+python -m pip install --upgrade -r requirements.txt
+if %errorlevel% neq 0 (
+    echo.
+    echo [WARNING] Could not update dependencies. Continuing anyway...
+    echo.
+)
 
 python music_download.py
 

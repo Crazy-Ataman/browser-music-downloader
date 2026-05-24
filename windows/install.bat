@@ -24,9 +24,9 @@ if %errorlevel% neq 0 (
 echo [OK] Python is detected.
 
 echo.
-echo [INFO] Installing/Updating dependencies...
+echo [INFO] Installing/Updating dependencies (latest versions)...
 python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+python -m pip install --upgrade -r requirements.txt
 if %errorlevel% neq 0 (
     echo.
     echo [ERROR] Failed to install dependencies. Check your internet connection.
