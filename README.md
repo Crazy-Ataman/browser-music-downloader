@@ -25,6 +25,9 @@ It handles the entire process: locating browser profiles, decompressing session 
     *   Cleans junk tags (tracking IDs, comments).
     *   Attempts to find the **original release year** instead of the YouTube upload year.
     *   Forces ID3v2.3 compatibility for Windows Explorer and Car Audio systems.
+    *   **Renames files to `Artist - Title.mp3`** after download using ID3 tags (e.g. `Чёрный обелиск - Беги.mp3`).
+    *   Strips YouTube junk from names and tags: `(lyric video)`, `(official video)`, `(music video)`, and similar.
+    *   Fixes common YouTube mismatches: channel name in the artist tag (e.g. StarPro), duplicate artist in the title (`Anamnez - Intro` → title `Intro`), and channel suffixes (`официальный канал`, `official channel`).
 *   **Cross-Platform:** Works on Windows, macOS, and Linux (Standard, Snap, and Flatpak installations).
 
 ## Requirements
@@ -138,7 +141,7 @@ The codebase is split into modules for clarity and maintainability:
     *   **Sessions:** Scrapes the binary `Current Session` (SNSS format) using Regex to find YouTube URLs even if the file is partially locked.
     *   **Bookmarks:** Parses the `Bookmarks` JSON file to extract organized folders.
 *   **Downloading:** The script uses yt-dlp with a robust strategy loop. It attempts to download without cookies first. If YouTube returns a 403 Forbidden or Sign-in Required error, it automatically retries using cookies from your local browser profiles to authenticate the request.
-*   **Post-Processing:** Uses `mutagen` to scrub "provided to YouTube" text and technical tags, leaving you with a clean, professional-looking music library.
+*   **Post-Processing:** Uses `mutagen` to scrub "provided to YouTube" text and technical tags, normalize artist/title fields, and rename each file to **`Artist - Title`** so your folder matches what music players show.
 
 ## License
 

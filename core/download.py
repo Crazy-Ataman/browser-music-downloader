@@ -10,7 +10,7 @@ from yt_dlp.utils import DownloadError
 from app_logging import FatalForbiddenError, FragmentLogger
 from config import QualityProfile, RuntimeSettings
 
-from .metadata import clean_tags, sanitize_text
+from .metadata import clean_tags, rename_from_tags
 from .ui import MSG_ALL_FAILED, MSG_STRATEGY_FAILED, SEP_LINE
 
 
@@ -435,20 +435,8 @@ def download_audio(
                 file_path.name,
             )
             sys.stdout.flush()
-            original_stem = file_path.stem
-            clean_stem = sanitize_text(original_stem)
-            if clean_stem != original_stem:
-                new_filename = f"{clean_stem}{file_path.suffix}"
-                new_path = file_path.parent / new_filename
-                try:
-                    if new_path.exists():
-                        new_path = file_path.parent / f"{clean_stem}_{i}{file_path.suffix}"
-                    os.rename(file_path, new_path)
-                    file_path = new_path
-                except OSError as e:
-                    app_logging.log.error("Could not rename %s: %s", file_path.name, e)
-                    print("\n  Rename error: {} — {}".format(file_path.name, e))
             clean_tags(file_path)
+            file_path = rename_from_tags(file_path, index=i)
 
     files_after = set(download_path.glob("*"))
     new_files_count = len(files_after - files_before)
